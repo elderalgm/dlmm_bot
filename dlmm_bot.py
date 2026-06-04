@@ -938,7 +938,8 @@ def send_telegram_menu(config, state):
 def handle_telegram_status(config, state):
     # Fetch balance
     bal_res = run_bridge(["get-balance"])
-    balance_str = f"{bal_res.get('balance', 0.0):.4f} SOL" if bal_res.get("success") else "Error"
+    balance_str = f"{bal_res.get('balance', 0.0):.4f} SOL" if bal_res.get("success") else f"Hata ({bal_res.get('error', 'Bilinmeyen Hata')})"
+
     
     dry_run = is_dry_run(config, state)
     mode_str = "🧪 DRY RUN (Simülasyon)" if dry_run else "🟢 LIVE TRADING (Gerçek)"
