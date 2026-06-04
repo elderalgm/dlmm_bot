@@ -369,6 +369,19 @@ def fetch_meteora_pools(token_address):
     return []
 
 # ─── Screen Pool ──────────────────────────────────────────────
+def get_safe_tvl(p):
+    if not isinstance(p, dict):
+        return 0.0
+    tvl = p.get("tvl")
+    if tvl is None:
+        tvl = p.get("liquidity")
+    if tvl is None:
+        return 0.0
+    try:
+        return float(tvl)
+    except (ValueError, TypeError):
+        return 0.0
+
 def select_best_pool(config, pools):
     eligible_pools = []
     
@@ -377,11 +390,26 @@ def select_best_pool(config, pools):
     min_fee = config.get("min_base_fee_pct", 2.0)
     
     for p in pools:
-        cfg = p.get("pool_config", {})
-        tvl = p.get("tvl", p.get("liquidity", 0))
+        cfg = p.get("pool_config") or {}
+        tvl = get_safe_tvl(p)
+        
         bin_step = cfg.get("bin_step", 0)
+        try:
+            bin_step = int(bin_step or 0)
+        except (ValueError, TypeError):
+            bin_step = 0
+            
         base_fee = cfg.get("base_fee_pct", 0)
+        try:
+            base_fee = float(base_fee or 0.0)
+        except (ValueError, TypeError):
+            base_fee = 0.0
+            
         collect_fee_mode = cfg.get("collect_fee_mode", -1)
+        try:
+            collect_fee_mode = int(collect_fee_mode or -1)
+        except (ValueError, TypeError):
+            collect_fee_mode = -1
         
         # Filters: TVL, Mode 1 (SOL fees), Bin Step, Base Fee
         if (tvl >= min_tvl and
@@ -394,7 +422,7 @@ def select_best_pool(config, pools):
         return None
     
     # Select highest TVL pool
-    eligible_pools.sort(key=lambda x: x.get("tvl", x.get("liquidity", 0)), reverse=True)
+    eligible_pools.sort(key=lambda x: get_safe_tvl(x), reverse=True)
     return eligible_pools[0]
 
 # ─── Main Bot Logic ───────────────────────────────────────────
@@ -1404,12 +1432,30 @@ def check_pool_filters(config, p):
     min_bin_step = config.get("min_bin_step", 80)
     min_fee = config.get("min_base_fee_pct", 2.0)
     
-    cfg = p.get("pool_config", {})
-    tvl = p.get("tvl", p.get("liquidity", 0))
-    bin_step = cfg.get("bin_step", 0)
-    base_fee = cfg.get("base_fee_pct", 0)
-    collect_fee_mode = cfg.get("collect_fee_mode", -1)
+    cfg = p.get("pool_config") or {}
+    tvl = get_safe_tvl(p)
     
+    # Safe parsing of bin_step
+    bin_step = cfg.get("bin_step", 0)
+    try:
+        bin_step = int(bin_step or 0)
+    except (ValueError, TypeError):
+        bin_step = 0
+        
+    # Safe parsing of base_fee
+    base_fee = cfg.get("base_fee_pct", 0)
+    try:
+        base_fee = float(base_fee or 0.0)
+    except (ValueError, TypeError):
+        base_fee = 0.0
+        
+    # Safe parsing of collect_fee_mode
+    collect_fee_mode = cfg.get("collect_fee_mode", -1)
+    try:
+        collect_fee_mode = int(collect_fee_mode or -1)
+    except (ValueError, TypeError):
+        collect_fee_mode = -1
+        
     failed = []
     if tvl < min_tvl:
         failed.append(f"TVL Yetersiz (${tvl:,.0f} < ${min_tvl:,.0f})")
@@ -1455,8 +1501,8 @@ def handle_manual_buy_text(config, state, chat_id, text):
             else:
                 failing_pools.append((p, failed))
                 
-        passing_pools.sort(key=lambda x: x[0].get("tvl", x[0].get("liquidity", 0)), reverse=True)
-        failing_pools.sort(key=lambda x: x[0].get("tvl", x[0].get("liquidity", 0)), reverse=True)
+        passing_pools.sort(key=lambda x: get_safe_tvl(x[0]), reverse=True)
+        failing_pools.sort(key=lambda x: get_safe_tvl(x[0]), reverse=True)
         
         all_sorted = passing_pools + failing_pools
         if not all_sorted:
@@ -1474,8 +1520,8 @@ def handle_manual_buy_text(config, state, chat_id, text):
         
         for idx, (p, failed) in enumerate(displayed_pools, 1):
             address = p["address"]
-            cfg = p.get("pool_config", {})
-            tvl = p.get("tvl", p.get("liquidity", 0))
+            cfg = p.get("pool_config") or {}
+            tvl = get_safe_tvl(p)
             bin_step = cfg.get("bin_step", 0)
             base_fee = cfg.get("base_fee_pct", 0)
             
