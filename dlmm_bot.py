@@ -166,6 +166,32 @@ def send_telegram(config, text, reply_markup=None):
     except Exception as e:
         logging.error(f"Failed to send Telegram notification: {e}")
 
+def setup_telegram_commands(config):
+    token = config.get("telegram_token")
+    if not token or token.startswith("YOUR_"):
+        return
+    url = f"https://api.telegram.org/bot{token}/setMyCommands"
+    payload = {
+        "commands": [
+            {"command": "menu", "description": "Ana Menüyü Göster"},
+            {"command": "status", "description": "Bot Durumu ve Bakiye"},
+            {"command": "positions", "description": "Aktif Pozisyonlar"},
+            {"command": "candidates", "description": "GMGN Aday Tokenler"},
+            {"command": "buy", "description": "Manuel İşlem Başlat"},
+            {"command": "history", "description": "Son 5 İşlem Geçmişi"},
+            {"command": "toggle_mode", "description": "Canlı/Simülasyon Değiştir"},
+            {"command": "toggle_pause", "description": "Botu Başlat/Durdur"}
+        ]
+    }
+    try:
+        res = requests.post(url, json=payload, timeout=10)
+        if res.status_code == 200:
+            logging.info("Telegram command menu successfully configured.")
+        else:
+            logging.error(f"Failed to set Telegram commands: {res.text}")
+    except Exception as e:
+        logging.error(f"Error setting Telegram commands: {e}")
+
 # GMGN API Auth Query Builder
 def build_auth_query(config):
     return {
@@ -1729,6 +1755,12 @@ def main():
     logging.info("🤖 DLMM Trading Bot starting...")
     config = load_config()
     state = load_state()
+    
+    # Configure Telegram commands menu (left side blue button)
+    try:
+        setup_telegram_commands(config)
+    except Exception as e:
+        logging.error(f"Error setting telegram commands at startup: {e}")
     
     # Send start message
     send_telegram_menu(config, state)
