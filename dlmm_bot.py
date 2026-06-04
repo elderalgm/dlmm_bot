@@ -1469,229 +1469,241 @@ def check_pool_filters(config, p):
     return len(failed) == 0, failed
 
 def handle_manual_buy_text(config, state, chat_id, text):
-    global manual_buy_sessions
-    session = manual_buy_sessions.get(chat_id)
-    if not session:
-        return
-        
-    step = session.get("step")
-    
-    if step == "awaiting_address":
-        token_address = text.strip()
-        if len(token_address) < 32 or len(token_address) > 44 or not token_address.isalnum():
-            send_telegram(config, "❌ <b>Hata:</b> Geçersiz Solana token adresi. Lütfen doğru adresi gönderin:")
+    try:
+        global manual_buy_sessions
+        session = manual_buy_sessions.get(chat_id)
+        if not session:
             return
             
-        send_telegram(config, f"⏳ <b>{token_address[:10]}...</b> için Meteora havuzları aranıyor...")
+        step = session.get("step")
         
-        pools = fetch_meteora_pools(token_address)
-        if not pools:
-            send_telegram(config, "❌ <b>Hata:</b> Bu token için hiçbir Meteora DLMM havuzu bulunamadı.")
-            if chat_id in manual_buy_sessions:
-                del manual_buy_sessions[chat_id]
-            return
-            
-        # Group and sort pools: passing ones first (by TVL desc), failing ones next (by TVL desc)
-        passing_pools = []
-        failing_pools = []
-        for p in pools:
-            passed, failed = check_pool_filters(config, p)
-            if passed:
-                passing_pools.append((p, failed))
-            else:
-                failing_pools.append((p, failed))
-                
-        passing_pools.sort(key=lambda x: get_safe_tvl(x[0]), reverse=True)
-        failing_pools.sort(key=lambda x: get_safe_tvl(x[0]), reverse=True)
-        
-        all_sorted = passing_pools + failing_pools
-        if not all_sorted:
-            send_telegram(config, "❌ <b>Hata:</b> Bu token için hiçbir Meteora DLMM havuzu bulunamadı.")
-            if chat_id in manual_buy_sessions:
-                del manual_buy_sessions[chat_id]
-            return
-            
-        # Limit to top 6 pools
-        displayed_pools = all_sorted[:6]
-        
-        session["pool_map"] = {}
-        msg_lines = ["🔍 <b>Meteora DLMM Havuzları Bulundu</b>\nLütfen işlem yapmak istediğiniz havuzu seçin:\n━━━━━━━━━━━━━━━━━━"]
-        inline_keyboard = []
-        
-        for idx, (p, failed) in enumerate(displayed_pools, 1):
-            address = p["address"]
-            cfg = p.get("pool_config") or {}
-            tvl = get_safe_tvl(p)
-            bin_step = cfg.get("bin_step", 0)
-            base_fee = cfg.get("base_fee_pct", 0)
-            
-            is_best = (idx == 1 and len(passing_pools) > 0) or (len(passing_pools) == 0 and idx == 1)
-            
-            session["pool_map"][str(idx)] = p
-            
-            prefix = "⭐ Önerilen | " if is_best else ""
-            status_marker = "🟢 UYGUN" if not failed else "⚠️ UYARI"
-            
-            line = (
-                f"{idx}. <b>{prefix}Havuz:</b> <code>{address[:8]}...{address[-8:]}</code>\n"
-                f"  • TVL: ${tvl:,.0f} | Fee: %{base_fee:.2f} | Bin Step: {bin_step}\n"
-                f"  • Durum: <code>{status_marker}</code>"
-            )
-            if failed:
-                line += f" (<i>{', '.join(failed)}</i>)"
-            msg_lines.append(line + "\n")
-            
-            btn_text = f"{'⭐ ' if is_best else ''}Havuz {idx} ({status_marker})"
-            inline_keyboard.append([{"text": btn_text, "callback_data": f"mb_pool_{idx}"}])
-            
-        inline_keyboard.append([{"text": "❌ İptal", "callback_data": "mb_filter_no"}])
-        
-        # Save state in session
-        session["step"] = "awaiting_pool_selection"
-        session["token_address"] = token_address
-        
-        reply_markup = {"inline_keyboard": inline_keyboard}
-        send_telegram(config, "\n".join(msg_lines), reply_markup=reply_markup)
-            
-    elif step == "awaiting_range":
-        val_str = text.strip()
-        try:
-            val = float(val_str)
-            if val <= 0 or val >= 100:
-                raise ValueError()
-            session["downside_pct"] = val
-            process_range_selected(config, session, chat_id)
-        except ValueError:
-            send_telegram(config, "❌ <b>Hata:</b> Lütfen 1 ile 99 arasında geçerli bir yüzde değeri yazın (Örn: 92):")
-            
-    elif step == "awaiting_amount":
-        val_str = text.strip()
-        try:
-            val = float(val_str)
-            if val <= 0.001:
-                send_telegram(config, "❌ <b>Hata:</b> Miktar 0.001 SOL'den yüksek olmalıdır. Lütfen tekrar girin:")
+        if step == "awaiting_address":
+            token_address = text.strip()
+            if len(token_address) < 32 or len(token_address) > 44 or not token_address.isalnum():
+                send_telegram(config, "❌ <b>Hata:</b> Geçersiz Solana token adresi. Lütfen doğru adresi gönderin:")
                 return
-            session["amount_sol"] = val
-            show_buy_confirmation(config, session, chat_id)
-        except ValueError:
-            send_telegram(config, "❌ <b>Hata:</b> Lütfen geçerli bir sayı girin (Örn: 0.05):")
-
-def handle_manual_buy_callback(config, state, chat_id, cb_data):
-    global manual_buy_sessions
-    session = manual_buy_sessions.get(chat_id)
-    if not session:
-        return
-        
-    action = cb_data.replace("mb_", "")
-    
-    if action == "filter_yes":
-        session["bypass_filters"] = True
-        ask_strategy_step(config, session)
-        
-    elif action == "filter_no":
-        if chat_id in manual_buy_sessions:
-            del manual_buy_sessions[chat_id]
-        send_telegram(config, "❌ Manuel işlem açma talebi iptal edildi.")
-        send_telegram_menu(config, state)
-        
-    elif action.startswith("pool_"):
-        pool_idx = action.replace("pool_", "")
-        p_map = session.get("pool_map", {})
-        selected_pool = p_map.get(pool_idx)
-        if not selected_pool:
-            send_telegram(config, "❌ Hata: Seçilen havuz oturum bilgisinde bulunamadı. Lütfen tekrar /buy yazarak başlayın.")
-            if chat_id in manual_buy_sessions:
-                del manual_buy_sessions[chat_id]
-            return
+                
+            send_telegram(config, f"⏳ <b>{token_address[:10]}...</b> için Meteora havuzları aranıyor...")
             
-        session["selected_pool"] = selected_pool
-        session["symbol"] = selected_pool.get("tokenX", {}).get("symbol", "TOKEN")
-        
-        # Check filters for this specific pool
-        passed, failed_reasons = check_pool_filters(config, selected_pool)
-        if not passed:
-            # Show filter bypass warning
-            session["step"] = "awaiting_filter_bypass"
+            pools = fetch_meteora_pools(token_address)
+            if not pools:
+                send_telegram(config, "❌ <b>Hata:</b> Bu token için hiçbir Meteora DLMM havuzu bulunamadı.")
+                if chat_id in manual_buy_sessions:
+                    del manual_buy_sessions[chat_id]
+                return
+                
+            # Group and sort pools: passing ones first (by TVL desc), failing ones next (by TVL desc)
+            passing_pools = []
+            failing_pools = []
+            for p in pools:
+                passed, failed = check_pool_filters(config, p)
+                if passed:
+                    passing_pools.append((p, failed))
+                else:
+                    failing_pools.append((p, failed))
+                    
+            passing_pools.sort(key=lambda x: get_safe_tvl(x[0]), reverse=True)
+            failing_pools.sort(key=lambda x: get_safe_tvl(x[0]), reverse=True)
             
-            failed_str = "\n".join([f"• {r}" for r in failed_reasons])
-            bypass_keyboard = {
-                "inline_keyboard": [
-                    [
-                        {"text": "✅ Evet, Devam Et", "callback_data": "mb_filter_yes"},
-                        {"text": "❌ Hayır, İptal", "callback_data": "mb_filter_no"}
-                    ]
-                ]
-            }
-            msg = (
-                f"⚠️ <b>Havuz Filtre Uyarısı</b>\n"
-                f"Seçtiğiniz havuz (<code>{selected_pool['address']}</code>) "
-                f"güvenlik filtrelerimizden geçemedi:\n\n"
-                f"{failed_str}\n\n"
-                f"Yine de bu havuz üzerinden devam etmek istiyor musunuz?"
-            )
-            send_telegram(config, msg, reply_markup=bypass_keyboard)
-        else:
-            # Passed! Move directly to strategy step
-            ask_strategy_step(config, session)
-        
-    elif action.startswith("strat_"):
-        strategy = action.replace("strat_", "")
-        session["strategy"] = strategy
-        ask_range_step(config, session)
-        
-    elif action.startswith("range_"):
-        range_val = action.replace("range_", "")
-        if range_val == "custom":
-            session["step"] = "awaiting_range"
-            send_telegram(config, "✍️ Lütfen istediğiniz <b>düşüş yüzdesini</b> sohbete yazın (örn: 92):")
-        else:
+            all_sorted = passing_pools + failing_pools
+            if not all_sorted:
+                send_telegram(config, "❌ <b>Hata:</b> Bu token için hiçbir Meteora DLMM havuzu bulunamadı.")
+                if chat_id in manual_buy_sessions:
+                    del manual_buy_sessions[chat_id]
+                return
+                
+            # Limit to top 6 pools
+            displayed_pools = all_sorted[:6]
+            
+            session["pool_map"] = {}
+            msg_lines = ["🔍 <b>Meteora DLMM Havuzları Bulundu</b>\nLütfen işlem yapmak istediğiniz havuzu seçin:\n━━━━━━━━━━━━━━━━━━"]
+            inline_keyboard = []
+            
+            for idx, (p, failed) in enumerate(displayed_pools, 1):
+                address = p["address"]
+                cfg = p.get("pool_config") or {}
+                tvl = get_safe_tvl(p)
+                bin_step = cfg.get("bin_step", 0)
+                base_fee = cfg.get("base_fee_pct", 0)
+                
+                is_best = (idx == 1 and len(passing_pools) > 0) or (len(passing_pools) == 0 and idx == 1)
+                
+                session["pool_map"][str(idx)] = p
+                
+                prefix = "⭐ Önerilen | " if is_best else ""
+                status_marker = "🟢 UYGUN" if not failed else "⚠️ UYARI"
+                
+                line = (
+                    f"{idx}. <b>{prefix}Havuz:</b> <code>{address[:8]}...{address[-8:]}</code>\n"
+                    f"  • TVL: ${tvl:,.0f} | Fee: %{base_fee:.2f} | Bin Step: {bin_step}\n"
+                    f"  • Durum: <code>{status_marker}</code>"
+                )
+                if failed:
+                    line += f" (<i>{', '.join(failed)}</i>)"
+                msg_lines.append(line + "\n")
+                
+                btn_text = f"{'⭐ ' if is_best else ''}Havuz {idx} ({status_marker})"
+                inline_keyboard.append([{"text": btn_text, "callback_data": f"mb_pool_{idx}"}])
+                
+            inline_keyboard.append([{"text": "❌ İptal", "callback_data": "mb_filter_no"}])
+            
+            # Save state in session
+            session["step"] = "awaiting_pool_selection"
+            session["token_address"] = token_address
+            
+            reply_markup = {"inline_keyboard": inline_keyboard}
+            send_telegram(config, "\n".join(msg_lines), reply_markup=reply_markup)
+                
+        elif step == "awaiting_range":
+            val_str = text.strip()
             try:
-                session["downside_pct"] = float(range_val)
+                val = float(val_str)
+                if val <= 0 or val >= 100:
+                    raise ValueError()
+                session["downside_pct"] = val
                 process_range_selected(config, session, chat_id)
             except ValueError:
-                pass
+                send_telegram(config, "❌ <b>Hata:</b> Lütfen 1 ile 99 arasında geçerli bir yüzde değeri yazın (Örn: 92):")
                 
-    elif action == "amount_max":
-        pool_address = session["selected_pool"]["address"]
-        downside_pct = session.get("downside_pct", 92)
-        
-        range_check = run_bridge(["check-range", pool_address, str(downside_pct)])
-        if not range_check.get("success"):
-            send_telegram(config, f"❌ Hata: Menzil ve kira bilgisi sorgulanamadı: {range_check.get('error')}")
-            return
-            
-        refundable_rent = range_check.get("refundable_rent", 0.25)
-        gas_reserve = config.get("gas_reserve", 0.05)
-        
-        bal_check = run_bridge(["get-balance"])
-        if not bal_check.get("success"):
-            send_telegram(config, f"❌ Hata: Cüzdan bakiyesi alınamadı: {bal_check.get('error')}")
-            return
-            
-        wallet_sol = bal_check.get("balance", 0.0)
-        max_invest = wallet_sol - refundable_rent - gas_reserve
-        
-        if max_invest < 0.01:
-            send_telegram(config, (
-                f"❌ <b>Hata: Yetersiz Bakiye!</b>\n"
-                f"• Cüzdan SOL: {wallet_sol:.4f}\n"
-                f"• Gerekli Kira: {refundable_rent:.4f}\n"
-                f"• Gaz Rezervi: {gas_reserve:.4f}\n"
-                f"Yatırılabilecek net SOL ({max_invest:.4f}) 0.01 limitinden düşük."
-            ))
-            return
-            
-        session["amount_sol"] = max_invest
-        show_buy_confirmation(config, session, chat_id)
-        
-    elif action == "confirm_yes":
-        execute_manual_buy(config, state, chat_id)
-        
-    elif action == "confirm_no":
+        elif step == "awaiting_amount":
+            val_str = text.strip()
+            try:
+                val = float(val_str)
+                if val <= 0.001:
+                    send_telegram(config, "❌ <b>Hata:</b> Miktar 0.001 SOL'den yüksek olmalıdır. Lütfen tekrar girin:")
+                    return
+                session["amount_sol"] = val
+                show_buy_confirmation(config, session, chat_id)
+            except ValueError:
+                send_telegram(config, "❌ <b>Hata:</b> Lütfen geçerli bir sayı girin (Örn: 0.05):")
+    except Exception as e:
+        logging.error(f"Error in handle_manual_buy_text: {e}", exc_info=True)
+        send_telegram(config, f"❌ <b>Sistem Hatası:</b> Havuz listesi oluşturulurken teknik bir sorun oluştu: <code>{str(e)}</code>")
         if chat_id in manual_buy_sessions:
             del manual_buy_sessions[chat_id]
-        send_telegram(config, "❌ Manuel işlem açma talebi iptal edildi.")
-        send_telegram_menu(config, state)
+
+def handle_manual_buy_callback(config, state, chat_id, cb_data):
+    try:
+        global manual_buy_sessions
+        session = manual_buy_sessions.get(chat_id)
+        if not session:
+            return
+            
+        action = cb_data.replace("mb_", "")
+        
+        if action == "filter_yes":
+            session["bypass_filters"] = True
+            ask_strategy_step(config, session)
+            
+        elif action == "filter_no":
+            if chat_id in manual_buy_sessions:
+                del manual_buy_sessions[chat_id]
+            send_telegram(config, "❌ Manuel işlem açma talebi iptal edildi.")
+            send_telegram_menu(config, state)
+            
+        elif action.startswith("pool_"):
+            pool_idx = action.replace("pool_", "")
+            p_map = session.get("pool_map", {})
+            selected_pool = p_map.get(pool_idx)
+            if not selected_pool:
+                send_telegram(config, "❌ Hata: Seçilen havuz oturum bilgisinde bulunamadı. Lütfen tekrar /buy yazarak başlayın.")
+                if chat_id in manual_buy_sessions:
+                    del manual_buy_sessions[chat_id]
+                return
+                
+            session["selected_pool"] = selected_pool
+            session["symbol"] = selected_pool.get("tokenX", {}).get("symbol", "TOKEN")
+            
+            # Check filters for this specific pool
+            passed, failed_reasons = check_pool_filters(config, selected_pool)
+            if not passed:
+                # Show filter bypass warning
+                session["step"] = "awaiting_filter_bypass"
+                
+                failed_str = "\n".join([f"• {r}" for r in failed_reasons])
+                bypass_keyboard = {
+                    "inline_keyboard": [
+                        [
+                            {"text": "✅ Evet, Devam Et", "callback_data": "mb_filter_yes"},
+                            {"text": "❌ Hayır, İptal", "callback_data": "mb_filter_no"}
+                        ]
+                    ]
+                }
+                msg = (
+                    f"⚠️ <b>Havuz Filtre Uyarısı</b>\n"
+                    f"Seçtiğiniz havuz (<code>{selected_pool['address']}</code>) "
+                    f"güvenlik filtrelerimizden geçemedi:\n\n"
+                    f"{failed_str}\n\n"
+                    f"Yine de bu havuz üzerinden devam etmek istiyor musunuz?"
+                )
+                send_telegram(config, msg, reply_markup=bypass_keyboard)
+            else:
+                # Passed! Move directly to strategy step
+                ask_strategy_step(config, session)
+            
+        elif action.startswith("strat_"):
+            strategy = action.replace("strat_", "")
+            session["strategy"] = strategy
+            ask_range_step(config, session)
+            
+        elif action.startswith("range_"):
+            range_val = action.replace("range_", "")
+            if range_val == "custom":
+                session["step"] = "awaiting_range"
+                send_telegram(config, "✍️ Lütfen istediğiniz <b>düşüş yüzdesini</b> sohbete yazın (örn: 92):")
+            else:
+                try:
+                    session["downside_pct"] = float(range_val)
+                    process_range_selected(config, session, chat_id)
+                except ValueError:
+                    pass
+                    
+        elif action == "amount_max":
+            pool_address = session["selected_pool"]["address"]
+            downside_pct = session.get("downside_pct", 92)
+            
+            range_check = run_bridge(["check-range", pool_address, str(downside_pct)])
+            if not range_check.get("success"):
+                send_telegram(config, f"❌ Hata: Menzil ve kira bilgisi sorgulanamadı: {range_check.get('error')}")
+                return
+                
+            refundable_rent = range_check.get("refundable_rent", 0.25)
+            gas_reserve = config.get("gas_reserve", 0.05)
+            
+            bal_check = run_bridge(["get-balance"])
+            if not bal_check.get("success"):
+                send_telegram(config, f"❌ Hata: Cüzdan bakiyesi alınamadı: {bal_check.get('error')}")
+                return
+                
+            wallet_sol = bal_check.get("balance", 0.0)
+            max_invest = wallet_sol - refundable_rent - gas_reserve
+            
+            if max_invest < 0.01:
+                send_telegram(config, (
+                    f"❌ <b>Hata: Yetersiz Bakiye!</b>\n"
+                    f"• Cüzdan SOL: {wallet_sol:.4f}\n"
+                    f"• Gerekli Kira: {refundable_rent:.4f}\n"
+                    f"• Gaz Rezervi: {gas_reserve:.4f}\n"
+                    f"Yatırılabilecek net SOL ({max_invest:.4f}) 0.01 limitinden düşük."
+                ))
+                return
+                
+            session["amount_sol"] = max_invest
+            show_buy_confirmation(config, session, chat_id)
+            
+        elif action == "confirm_yes":
+            execute_manual_buy(config, state, chat_id)
+            
+        elif action == "confirm_no":
+            if chat_id in manual_buy_sessions:
+                del manual_buy_sessions[chat_id]
+            send_telegram(config, "❌ Manuel işlem açma talebi iptal edildi.")
+            send_telegram_menu(config, state)
+    except Exception as e:
+        logging.error(f"Error in handle_manual_buy_callback: {e}", exc_info=True)
+        send_telegram(config, f"❌ <b>Sistem Hatası:</b> Callback işlemi sırasında bir sorun oluştu: <code>{str(e)}</code>")
+        if chat_id in manual_buy_sessions:
+            del manual_buy_sessions[chat_id]
 
 
 # ─── Manual Position Opener ───────────────────────────────────
