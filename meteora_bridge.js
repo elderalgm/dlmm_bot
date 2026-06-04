@@ -50,7 +50,7 @@ async function cmdGetBalance(config) {
 }
 
 // ─── Command: check-range ─────────────────────────────────────
-async function cmdCheckRange(config, poolAddressStr) {
+async function cmdCheckRange(config, poolAddressStr, downsidePctStr) {
   const connection = getSolanaConnection(config);
   const poolPubKey = new PublicKey(poolAddressStr);
   const pool = await DLMM.create(connection, poolPubKey);
@@ -60,7 +60,13 @@ async function cmdCheckRange(config, poolAddressStr) {
   const activePriceUnscaled = Number(activeBin.price.toString());
   const activePriceScaled = Number(pool.fromPricePerLamport(activeBin.price));
   
-  const downsidePct = 92;
+  let downsidePct = 92;
+  if (downsidePctStr) {
+    const val = parseFloat(downsidePctStr);
+    if (!isNaN(val) && val > 0 && val < 100) {
+      downsidePct = val;
+    }
+  }
   const lowerPriceUnscaled = activePriceUnscaled * (1 - downsidePct / 100);
   const lowerBinId = DLMM.getBinIdFromPrice(lowerPriceUnscaled, binStep, true);
   const totalBins = activeBin.binId - lowerBinId;
@@ -101,7 +107,7 @@ async function cmdCheckRange(config, poolAddressStr) {
 }
 
 // ─── Command: open ────────────────────────────────────────────
-async function cmdOpen(config, poolAddressStr, amountSolStr) {
+async function cmdOpen(config, poolAddressStr, amountSolStr, downsidePctStr, strategyTypeStr) {
   if (config.dry_run) {
     return { success: true, dry_run: true, message: "Dry run: position would be opened." };
   }
@@ -114,8 +120,17 @@ async function cmdOpen(config, poolAddressStr, amountSolStr) {
   const binStep = pool.lbPair.binStep;
   
   const activePriceUnscaled = Number(activeBin.price.toString());
-  const downsidePct = 92;
+  
+  let downsidePct = 92;
+  if (downsidePctStr) {
+    const val = parseFloat(downsidePctStr);
+    if (!isNaN(val) && val > 0 && val < 100) {
+      downsidePct = val;
+    }
+  }
+  
   const lowerPriceUnscaled = activePriceUnscaled * (1 - downsidePct / 100);
+
   const lowerBinId = DLMM.getBinIdFromPrice(lowerPriceUnscaled, binStep, true);
   const totalBins = activeBin.binId - lowerBinId;
   
@@ -149,7 +164,16 @@ async function cmdOpen(config, poolAddressStr, amountSolStr) {
   // SOL is token Y
   const totalYLamports = new BN(Math.floor(amountSol * 1e9));
   const totalXLamports = new BN(0);
-  const strategyType = StrategyType.Spot;
+  
+  let strategyType = StrategyType.Spot;
+  if (strategyTypeStr) {
+    const s = strategyTypeStr.toLowerCase();
+    if (s === "bid-ask" || s === "bidask") {
+      strategyType = StrategyType.BidAsk;
+    } else if (s === "curve") {
+      strategyType = StrategyType.Curve;
+    }
+  }
   
   const newPosition = Keypair.generate();
   const txHashes = [];
@@ -364,11 +388,11 @@ async function main() {
       break;
     case "check-range":
       if (args.length < 2) throw new Error("Missing pool address for check-range");
-      result = await cmdCheckRange(config, args[1]);
+      result = await cmdCheckRange(config, args[1], args[2]);
       break;
     case "open":
-      if (args.length < 3) throw new Error("Missing arguments for open: <pool_address> <amount_sol>");
-      result = await cmdOpen(config, args[1], args[2]);
+      if (args.length < 3) throw new Error("Missing arguments for open: <pool_address> <amount_sol> [downside_pct] [strategy_type]");
+      result = await cmdOpen(config, args[1], args[2], args[3], args[4]);
       break;
     case "close":
       if (args.length < 3) throw new Error("Missing arguments for close: <pool_address> <position_address>");

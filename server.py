@@ -59,14 +59,14 @@ def main():
     
     # Start bot.py as subprocess
     logging.info("Launching dlmm_bot.py...")
-    bot_process = subprocess.Popen([python_path, "dlmm_bot.py"])
+    bot_process = subprocess.Popen([python_path, "-u", "dlmm_bot.py"])
     
     try:
         while True:
             bot_poll = bot_process.poll()
             if bot_poll is not None:
                 logging.error(f"dlmm_bot.py stopped unexpectedly! Restarting...")
-                bot_process = subprocess.Popen([python_path, "dlmm_bot.py"])
+                bot_process = subprocess.Popen([python_path, "-u", "dlmm_bot.py"])
             time.sleep(10)
     except KeyboardInterrupt:
         logging.info("Shutting down processes...")

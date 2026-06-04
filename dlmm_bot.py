@@ -675,6 +675,7 @@ def monitor_positions(config, state):
 
 # ─── Telegram Command Handler ─────────────────────────────────
 TELEGRAM_UPDATE_OFFSET = 0
+manual_buy_sessions = {}
 
 def handle_telegram_candidates(config, state):
     send_telegram(config, "🔍 <b>GMGN aday tokenleri taranıyor...</b>\nBu işlem birkaç saniye sürebilir.")
@@ -827,7 +828,7 @@ def handle_telegram_candidates(config, state):
         send_telegram(config, f"❌ Hata: Aday listesi alınırken bir sorun oluştu: {str(e)}")
 
 def check_telegram_commands(config, state):
-    global TELEGRAM_UPDATE_OFFSET
+    global TELEGRAM_UPDATE_OFFSET, manual_buy_sessions
     token = config.get("telegram_token")
     chat_id_expected = str(config.get("chat_id"))
     
@@ -867,6 +868,8 @@ def check_telegram_commands(config, state):
                 if cb_data.startswith("close_"):
                     token_address = cb_data.split("_", 1)[1]
                     handle_telegram_close_position(config, state, token_address)
+                elif cb_data.startswith("mb_"):
+                    handle_manual_buy_callback(config, state, chat_id, cb_data)
                 continue
                 
             message = update.get("message", {})
@@ -878,6 +881,22 @@ def check_telegram_commands(config, state):
                 
             # Parse text command
             cmd = text.lower()
+            
+            # Interactive manual buy session text interceptor
+            if chat_id in manual_buy_sessions:
+                if cmd == "/cancel":
+                    if chat_id in manual_buy_sessions:
+                        del manual_buy_sessions[chat_id]
+                    send_telegram(config, "❌ Manuel işlem açma talebi iptal edildi.")
+                    send_telegram_menu(config, state)
+                    continue
+                elif text.startswith("/"):
+                    # Other command aborts current session
+                    if chat_id in manual_buy_sessions:
+                        del manual_buy_sessions[chat_id]
+                else:
+                    handle_manual_buy_text(config, state, chat_id, text)
+                    continue
             if cmd in ["/start", "start", "menu", "help"]:
                 send_telegram_menu(config, state)
             elif cmd in ["/status", "📊 status"]:
@@ -906,6 +925,47 @@ def check_telegram_commands(config, state):
                 # Handle /close_tokenaddress direct text command
                 token_address = text.split("_", 1)[1]
                 handle_telegram_close_position(config, state, token_address)
+            elif cmd.startswith("/buy") or cmd.startswith("buy"):
+                # Normalize command separators: replace _ with space
+                normalized_text = text.replace("_", " ")
+                parts = normalized_text.split()
+                if len(parts) == 1:
+                    # Start interactive buy: Awaiting address
+                    manual_buy_sessions[chat_id] = {"step": "awaiting_address"}
+                    send_telegram(config, (
+                        "📥 <b>Manuel İşlem Açma</b>\n\n"
+                        "İşlem açmak istediğiniz tokenin <b>kontrat adresini (mint address)</b> gönderin:\n"
+                        "<i>(İşlemi iptal etmek için /cancel yazabilirsiniz)</i>"
+                    ))
+                elif len(parts) == 2:
+                    # Token address provided, start interactive flow from address check
+                    token_addr = parts[1]
+                    # Start interactive buy session
+                    manual_buy_sessions[chat_id] = {"step": "awaiting_address"}
+                    handle_manual_buy_text(config, state, chat_id, token_addr)
+                else:
+                    token_addr = parts[1]
+                    amount_sol = None
+                    downside_pct = 92
+                    strategy = "spot"
+                    
+                    if len(parts) >= 3:
+                        try:
+                            amount_sol = float(parts[2])
+                        except ValueError:
+                            pass
+                    if len(parts) >= 4:
+                        try:
+                            downside_pct = int(parts[3])
+                        except ValueError:
+                            pass
+                    if len(parts) >= 5:
+                        s_val = parts[4].lower()
+                        if s_val in ["spot", "curve", "bid-ask", "bidask"]:
+                            strategy = s_val
+                            
+                    handle_telegram_buy_token(config, state, token_addr, amount_sol, downside_pct, strategy)
+
                 
     except Exception as e:
         logging.error(f"Error processing telegram commands: {e}")
@@ -1107,6 +1167,490 @@ def handle_telegram_close_position(config, state, token_address):
     else:
         error_msg = close_res.get("error", "Unknown error")
         send_telegram(config, f"❌ Hata: Pozisyon kapatılamadı: <code>{error_msg}</code>")
+# ─── Interactive Manual Buy Helpers ───────────────────────────
+def ask_strategy_step(config, session):
+    session["step"] = "awaiting_strategy"
+    symbol = session["symbol"]
+    
+    strategy_keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "📊 Spot", "callback_data": "mb_strat_spot"},
+                {"text": "⚖️ Bid-Ask", "callback_data": "mb_strat_bid-ask"},
+                {"text": "📈 Curve", "callback_data": "mb_strat_curve"}
+            ],
+            [
+                {"text": "❌ İptal", "callback_data": "mb_filter_no"}
+            ]
+        ]
+    }
+    
+    msg = (
+        f"🤖 <b>Strateji Seçimi: {symbol}</b>\n\n"
+        f"Lütfen havuz likidite stratejisini seçin:\n"
+        f"• <b>Spot:</b> Fiyat aralığı boyunca eşit dağılım.\n"
+        f"• <b>Bid-Ask:</b> Aktif fiyata yakın daha fazla likidite.\n"
+        f"• <b>Curve:</b> Aktif fiyata çok yoğun likidite."
+    )
+    send_telegram(config, msg, reply_markup=strategy_keyboard)
+
+def ask_range_step(config, session):
+    session["step"] = "awaiting_range"
+    symbol = session["symbol"]
+    
+    range_keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "-%90", "callback_data": "mb_range_90"},
+                {"text": "-%92", "callback_data": "mb_range_92"},
+                {"text": "-%95", "callback_data": "mb_range_95"}
+            ],
+            [
+                {"text": "✍️ Özel Değer Gir...", "callback_data": "mb_range_custom"},
+                {"text": "❌ İptal", "callback_data": "mb_filter_no"}
+            ]
+        ]
+    }
+    
+    msg = (
+        f"📊 <b>Düşüş Aralığı (Range %): {symbol}</b>\n\n"
+        f"Pozisyonun aktif fiyattan ne kadar aşağıya kadar likidite sağlayacağını belirleyin.\n"
+        f"Örneğin, 92 girerseniz fiyattan -%92 aşağıya kadar range kurulur.\n\n"
+        f"Hızlı seçim yapabilir veya istediğiniz değeri yazabilirsiniz (örn. 90-95):"
+    )
+    send_telegram(config, msg, reply_markup=range_keyboard)
+
+def process_range_selected(config, session, chat_id):
+    global manual_buy_sessions
+    pool_address = session["selected_pool"]["address"]
+    downside_pct = session["downside_pct"]
+    symbol = session["symbol"]
+    
+    send_telegram(config, f"⏳ <b>{symbol}</b> havuzu için menzil ve kira maliyetleri sorgulanıyor...")
+    
+    # Check range & uninitialized bin arrays
+    range_check = run_bridge(["check-range", pool_address, str(downside_pct)])
+    if not range_check.get("success"):
+        send_telegram(config, f"❌ Hata: Menzil sorgusu başarısız oldu: {range_check.get('error')}")
+        if chat_id in manual_buy_sessions:
+            del manual_buy_sessions[chat_id]
+        return
+        
+    eligible = range_check.get("eligible", False)
+    missing_arrays = range_check.get("missing_arrays", 0)
+    non_refundable_fee = range_check.get("non_refundable_fee", 0.0)
+    
+    # "eğer non refund ise işlem açmasın error versin"
+    if not eligible or missing_arrays > 0:
+        send_telegram(config, (
+            f"❌ <b>Alım İptal Edildi:</b> Havuzda initialize edilmemiş bin arrayleri tespit edildi!\n\n"
+            f"• <b>Eksik Array Sayısı:</b> {missing_arrays}\n"
+            f"• <b>Kira Maliyeti (Geri alınamaz):</b> {non_refundable_fee:.5f} SOL\n\n"
+            f"Bu maliyet kalıcı olduğu ve geri ödenmediği için güvenlik kuralı gereği işlem iptal edildi."
+        ))
+        if chat_id in manual_buy_sessions:
+            del manual_buy_sessions[chat_id]
+        send_telegram_menu(config, load_state())
+        return
+        
+    session["refundable_rent"] = range_check.get("refundable_rent", 0.25)
+    
+    # Get balance
+    bal_check = run_bridge(["get-balance"])
+    wallet_sol = bal_check.get("balance", 0.0) if bal_check.get("success") else 0.0
+    gas_reserve = config.get("gas_reserve", 0.05)
+    max_invest = wallet_sol - session["refundable_rent"] - gas_reserve
+    if max_invest < 0:
+        max_invest = 0.0
+        
+    session["step"] = "awaiting_amount"
+    
+    amount_keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": f"💰 Maksimum SOL ({max_invest:.4f})", "callback_data": "mb_amount_max"}
+            ],
+            [
+                {"text": "❌ İptal", "callback_data": "mb_filter_no"}
+            ]
+        ]
+    }
+    
+    msg = (
+        f"💰 <b>Yatırılacak SOL Miktarını Girin</b>\n\n"
+        f"• <b>Menzil Alt/Üst Bin:</b> {range_check.get('lower_bin')} - {range_check.get('active_bin')}\n"
+        f"• <b>Refundable Escrow Rent:</b> ~{session['refundable_rent']:.5f} SOL\n"
+        f"• <b>Cüzdan Bakiyesi:</b> {wallet_sol:.5f} SOL\n"
+        f"• <b>Gaz Rezervi:</b> {gas_reserve:.5f} SOL\n"
+        f"• <b>Maksimum Yatırılabilir SOL:</b> <code>{max_invest:.5f} SOL</code>\n\n"
+        f"Lütfen yatırmak istediğiniz net SOL miktarını yazın (örn: 0.05):"
+    )
+    send_telegram(config, msg, reply_markup=amount_keyboard)
+
+def show_buy_confirmation(config, session, chat_id):
+    session["step"] = "awaiting_confirm"
+    symbol = session["symbol"]
+    pool_address = session["selected_pool"]["address"]
+    deposit_sol = session["amount_sol"]
+    downside_pct = session["downside_pct"]
+    strategy = session["strategy"]
+    refundable_rent = session["refundable_rent"]
+    
+    confirm_keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Onayla ve İşlemi Aç", "callback_data": "mb_confirm_yes"},
+                {"text": "❌ İptal Et", "callback_data": "mb_confirm_no"}
+            ]
+        ]
+    }
+    
+    msg = (
+        f"⚠️ <b>MANUEL İŞLEM ONAYI</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>Token:</b> {symbol}\n"
+        f"• <b>Havuz:</b> <code>{pool_address}</code>\n"
+        f"• <b>Yatırılacak Tutar:</b> {deposit_sol:.5f} SOL\n"
+        f"• <b>Geri Alınabilir Rent:</b> ~{refundable_rent:.5f} SOL\n"
+        f"• <b>Range:</b> -%{downside_pct}\n"
+        f"• <b>Strateji:</b> {strategy.upper()}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"İşlemi onaylıyor musunuz?"
+    )
+    send_telegram(config, msg, reply_markup=confirm_keyboard)
+
+def execute_manual_buy(config, state, chat_id):
+    global manual_buy_sessions
+    session = manual_buy_sessions.get(chat_id)
+    if not session:
+        return
+        
+    token_address = session["token_address"]
+    symbol = session["symbol"]
+    pool_address = session["selected_pool"]["address"]
+    deposit_sol = session["amount_sol"]
+    downside_pct = session["downside_pct"]
+    strategy = session["strategy"]
+    refundable_rent = session["refundable_rent"]
+    
+    send_telegram(config, f"🚀 <b>{symbol}</b> için on-chain pozisyon açılıyor...")
+    
+    open_res = run_bridge(["open", pool_address, f"{deposit_sol:.6f}", str(downside_pct), strategy])
+    
+    if open_res.get("success") or open_res.get("dry_run"):
+        pos_addr = open_res.get("position", "DRY_RUN_POSITION")
+        
+        # Save position in active positions
+        state["active_positions"][token_address] = {
+            "symbol": symbol,
+            "pool_address": pool_address,
+            "position_address": pos_addr,
+            "lower_bin": open_res.get("lower_bin"),
+            "upper_bin": open_res.get("upper_bin"),
+            "deposit_sol": deposit_sol,
+            "refundable_rent": open_res.get("refundable_rent", refundable_rent),
+            "opened_at": time.time()
+        }
+        save_state(state)
+        
+        mode_str = "🧪 SIMULATION" if is_dry_run(config, state) else "🟢 LIVE"
+        msg = (
+            f"✅ <b>MANUEL POZİSYON AÇILDI ({mode_str})</b>\n\n"
+            f"<b>Token:</b> {symbol}\n"
+            f"<b>Pool:</b> <code>{pool_address}</code>\n"
+            f"<b>Position:</b> <code>{pos_addr}</code>\n"
+            f"<b>Yatırılan:</b> {deposit_sol:.5f} SOL\n"
+            f"<b>Strateji:</b> {strategy.upper()}\n"
+            f"<b>Geri Alınabilir Kira:</b> {open_res.get('refundable_rent', refundable_rent):.5f} SOL\n"
+            f"<b>Aralık Bins:</b> {open_res.get('lower_bin')} - {open_res.get('upper_bin')}\n"
+            f"🔗 <a href='https://gmgn.ai/sol/token/{token_address}'>View on GMGN</a>"
+        )
+        send_telegram(config, msg)
+    else:
+        err = open_res.get("error", "Bilinmeyen Hata")
+        send_telegram(config, f"❌ <b>Hata:</b> Pozisyon açılamadı: <code>{err}</code>")
+        
+    if chat_id in manual_buy_sessions:
+        del manual_buy_sessions[chat_id]
+
+def handle_manual_buy_text(config, state, chat_id, text):
+    global manual_buy_sessions
+    session = manual_buy_sessions.get(chat_id)
+    if not session:
+        return
+        
+    step = session.get("step")
+    
+    if step == "awaiting_address":
+        token_address = text.strip()
+        if len(token_address) < 32 or len(token_address) > 44 or not token_address.isalnum():
+            send_telegram(config, "❌ <b>Hata:</b> Geçersiz Solana token adresi. Lütfen doğru adresi gönderin:")
+            return
+            
+        send_telegram(config, f"⏳ <b>{token_address[:10]}...</b> için Meteora havuzları aranıyor...")
+        
+        pools = fetch_meteora_pools(token_address)
+        if not pools:
+            send_telegram(config, "❌ <b>Hata:</b> Bu token için hiçbir Meteora DLMM havuzu bulunamadı.")
+            if chat_id in manual_buy_sessions:
+                del manual_buy_sessions[chat_id]
+            return
+            
+        selected_pool = select_best_pool(config, pools)
+        
+        if not selected_pool:
+            pools_sorted = sorted(pools, key=lambda x: x.get("tvl", x.get("liquidity", 0)), reverse=True)
+            if not pools_sorted:
+                send_telegram(config, "❌ <b>Hata:</b> Bu token için hiçbir Meteora DLMM havuzu bulunamadı.")
+                if chat_id in manual_buy_sessions:
+                    del manual_buy_sessions[chat_id]
+                return
+            candidate_pool = pools_sorted[0]
+            
+            min_tvl = config.get("min_tvl", 15000)
+            min_bin_step = config.get("min_bin_step", 80)
+            min_fee = config.get("min_base_fee_pct", 2.0)
+            
+            cfg = candidate_pool.get("pool_config", {})
+            tvl = candidate_pool.get("tvl", candidate_pool.get("liquidity", 0))
+            bin_step = cfg.get("bin_step", 0)
+            base_fee = cfg.get("base_fee_pct", 0)
+            collect_fee_mode = cfg.get("collect_fee_mode", -1)
+            
+            failed_filters = []
+            if tvl < min_tvl:
+                failed_filters.append(f"• TVL: ${tvl:,.2f} (Gerekli: >= ${min_tvl:,.0f}) ❌")
+            if collect_fee_mode != 1:
+                failed_filters.append(f"• Ücret Modu: {collect_fee_mode} (Gerekli: 1 - SOL) ❌")
+            if bin_step < min_bin_step:
+                failed_filters.append(f"• Bin Step: {bin_step} (Gerekli: >= {min_bin_step}) ❌")
+            if base_fee < min_fee:
+                failed_filters.append(f"• Temel Ücret Oranı: %{base_fee:.2f} (Gerekli: >= %{min_fee:.1f}) ❌")
+                
+            failed_str = "\n".join(failed_filters)
+            
+            session["step"] = "awaiting_filter_bypass"
+            session["token_address"] = token_address
+            session["selected_pool"] = candidate_pool
+            session["symbol"] = candidate_pool.get("tokenX", {}).get("symbol", "TOKEN")
+            
+            bypass_keyboard = {
+                "inline_keyboard": [
+                    [
+                        {"text": "✅ Evet, Devam Et", "callback_data": "mb_filter_yes"},
+                        {"text": "❌ Hayır, İptal", "callback_data": "mb_filter_no"}
+                    ]
+                ]
+            }
+            
+            msg = (
+                f"⚠️ <b>Havuz Filtre Uyarısı</b>\n"
+                f"Bulunan en yüksek likiditeli havuz (<code>{candidate_pool['address']}</code>) "
+                f"güvenlik filtrelerimizden geçemedi:\n\n"
+                f"{failed_str}\n\n"
+                f"Yine de bu havuz üzerinden devam etmek istiyor musunuz?"
+            )
+            send_telegram(config, msg, reply_markup=bypass_keyboard)
+        else:
+            session["token_address"] = token_address
+            session["selected_pool"] = selected_pool
+            session["symbol"] = selected_pool.get("tokenX", {}).get("symbol", "TOKEN")
+            ask_strategy_step(config, session)
+            
+    elif step == "awaiting_range":
+        val_str = text.strip()
+        try:
+            val = float(val_str)
+            if val <= 0 or val >= 100:
+                raise ValueError()
+            session["downside_pct"] = val
+            process_range_selected(config, session, chat_id)
+        except ValueError:
+            send_telegram(config, "❌ <b>Hata:</b> Lütfen 1 ile 99 arasında geçerli bir yüzde değeri yazın (Örn: 92):")
+            
+    elif step == "awaiting_amount":
+        val_str = text.strip()
+        try:
+            val = float(val_str)
+            if val <= 0.001:
+                send_telegram(config, "❌ <b>Hata:</b> Miktar 0.001 SOL'den yüksek olmalıdır. Lütfen tekrar girin:")
+                return
+            session["amount_sol"] = val
+            show_buy_confirmation(config, session, chat_id)
+        except ValueError:
+            send_telegram(config, "❌ <b>Hata:</b> Lütfen geçerli bir sayı girin (Örn: 0.05):")
+
+def handle_manual_buy_callback(config, state, chat_id, cb_data):
+    global manual_buy_sessions
+    session = manual_buy_sessions.get(chat_id)
+    if not session:
+        return
+        
+    action = cb_data.replace("mb_", "")
+    
+    if action == "filter_yes":
+        session["bypass_filters"] = True
+        ask_strategy_step(config, session)
+        
+    elif action == "filter_no":
+        if chat_id in manual_buy_sessions:
+            del manual_buy_sessions[chat_id]
+        send_telegram(config, "❌ Manuel işlem açma talebi iptal edildi.")
+        send_telegram_menu(config, state)
+        
+    elif action.startswith("strat_"):
+        strategy = action.replace("strat_", "")
+        session["strategy"] = strategy
+        ask_range_step(config, session)
+        
+    elif action.startswith("range_"):
+        range_val = action.replace("range_", "")
+        if range_val == "custom":
+            session["step"] = "awaiting_range"
+            send_telegram(config, "✍️ Lütfen istediğiniz <b>düşüş yüzdesini</b> sohbete yazın (örn: 92):")
+        else:
+            try:
+                session["downside_pct"] = float(range_val)
+                process_range_selected(config, session, chat_id)
+            except ValueError:
+                pass
+                
+    elif action == "amount_max":
+        pool_address = session["selected_pool"]["address"]
+        downside_pct = session.get("downside_pct", 92)
+        
+        range_check = run_bridge(["check-range", pool_address, str(downside_pct)])
+        if not range_check.get("success"):
+            send_telegram(config, f"❌ Hata: Menzil ve kira bilgisi sorgulanamadı: {range_check.get('error')}")
+            return
+            
+        refundable_rent = range_check.get("refundable_rent", 0.25)
+        gas_reserve = config.get("gas_reserve", 0.05)
+        
+        bal_check = run_bridge(["get-balance"])
+        if not bal_check.get("success"):
+            send_telegram(config, f"❌ Hata: Cüzdan bakiyesi alınamadı: {bal_check.get('error')}")
+            return
+            
+        wallet_sol = bal_check.get("balance", 0.0)
+        max_invest = wallet_sol - refundable_rent - gas_reserve
+        
+        if max_invest < 0.01:
+            send_telegram(config, (
+                f"❌ <b>Hata: Yetersiz Bakiye!</b>\n"
+                f"• Cüzdan SOL: {wallet_sol:.4f}\n"
+                f"• Gerekli Kira: {refundable_rent:.4f}\n"
+                f"• Gaz Rezervi: {gas_reserve:.4f}\n"
+                f"Yatırılabilecek net SOL ({max_invest:.4f}) 0.01 limitinden düşük."
+            ))
+            return
+            
+        session["amount_sol"] = max_invest
+        show_buy_confirmation(config, session, chat_id)
+        
+    elif action == "confirm_yes":
+        execute_manual_buy(config, state, chat_id)
+        
+    elif action == "confirm_no":
+        if chat_id in manual_buy_sessions:
+            del manual_buy_sessions[chat_id]
+        send_telegram(config, "❌ Manuel işlem açma talebi iptal edildi.")
+        send_telegram_menu(config, state)
+
+
+# ─── Manual Position Opener ───────────────────────────────────
+def handle_telegram_buy_token(config, state, token_address, deposit_amount_override=None, downside_pct=92, strategy="spot"):
+    send_telegram(config, f"🔍 <b>Manuel Alım Talebi:</b> <code>{token_address}</code> araştırılıyor...\n• Yüzde: -%{downside_pct}\n• Strateji: {strategy.upper()}")
+    
+    # 1. Fetch pools
+    pools = fetch_meteora_pools(token_address)
+    selected_pool = select_best_pool(config, pools)
+    if not selected_pool:
+        send_telegram(config, "❌ Hata: Bu token için kriterlerimize uygun (TVL >= 15k, fee mode=1, bin step >= 80, fee >= 2.0%) DLMM havuzu bulunamadı.")
+        return
+        
+    pool_address = selected_pool["address"]
+    symbol = selected_pool.get("tokenX", {}).get("symbol", "TOKEN")
+    
+    # 2. Check range & uninitialized bin arrays
+    range_check = run_bridge(["check-range", pool_address, str(downside_pct)])
+    if not range_check.get("success"):
+        send_telegram(config, f"❌ Hata: Menzil ve kira maliyeti sorgulanamadı: <code>{range_check.get('error')}</code>")
+        return
+        
+    eligible = range_check.get("eligible", False)
+    missing_arrays = range_check.get("missing_arrays", 0)
+    non_refundable_fee = range_check.get("non_refundable_fee", 0.0)
+    
+    # "eğer non refund ise işlem açmasın error versin"
+    if not eligible or missing_arrays > 0:
+        send_telegram(config, (
+            f"❌ <b>Alım İptal Edildi:</b> Havuzda initialize edilmemiş bin arrayleri tespit edildi!\n"
+            f"• <b>Eksik Array Sayısı:</b> {missing_arrays}\n"
+            f"• <b>Kira Maliyeti (Non-refundable):</b> {non_refundable_fee:.5f} SOL\n"
+            f"Bu maliyet kalıcı olduğu için güvenlik kuralı gereği işlem açılmadı."
+        ))
+        return
+        
+    # 3. Calculate deposit amount
+    bal_check = run_bridge(["get-balance"])
+    if not bal_check.get("success"):
+        send_telegram(config, f"❌ Hata: Cüzdan bakiyesi alınamadı: <code>{bal_check.get('error')}</code>")
+        return
+        
+    wallet_sol = bal_check.get("balance", 0.0)
+    refundable_rent = range_check.get("refundable_rent", 0.25)
+    gas_reserve = config.get("gas_reserve", 0.05)
+    
+    if deposit_amount_override is not None:
+        deposit_sol = deposit_amount_override
+    else:
+        deposit_sol = wallet_sol - refundable_rent - gas_reserve
+        
+    if deposit_sol < 0.01:
+        send_telegram(config, (
+            f"❌ Hata: Yetersiz Bakiye!\n"
+            f"• <b>Cüzdan SOL:</b> {wallet_sol:.5f}\n"
+            f"• <b>Gerekli Kira (Refundable):</b> {refundable_rent:.5f}\n"
+            f"• <b>Gaz Rezervi:</b> {gas_reserve:.5f}\n"
+            f"Yatırılabilecek net SOL ({deposit_sol:.5f}) 0.01 limitinden düşük."
+        ))
+        return
+        
+    send_telegram(config, f"🔔 <b>On-Chain Pozisyon Açılıyor:</b> {symbol} için {deposit_sol:.4f} SOL değerinde likidite yatırılıyor...")
+    
+    # 4. Open position (passing downside_pct and strategy)
+    open_res = run_bridge(["open", pool_address, f"{deposit_sol:.6f}", str(downside_pct), strategy])
+    if open_res.get("success") or open_res.get("dry_run"):
+        pos_addr = open_res.get("position", "DRY_RUN_POSITION")
+        state["active_positions"][token_address] = {
+            "symbol": symbol,
+            "pool_address": pool_address,
+            "position_address": pos_addr,
+            "lower_bin": open_res.get("lower_bin", range_check.get("lower_bin")),
+            "upper_bin": open_res.get("upper_bin", range_check.get("active_bin")),
+            "deposit_sol": deposit_sol,
+            "refundable_rent": open_res.get("refundable_rent", refundable_rent),
+            "opened_at": time.time()
+        }
+        save_state(state)
+        
+        mode_str = "🧪 SIMULATION" if is_dry_run(config, state) else "🟢 LIVE"
+        msg = (
+            f"✅ <b>MANUEL POZİSYON AÇILDI ({mode_str})</b>\n\n"
+            f"<b>Token:</b> {symbol}\n"
+            f"<b>Pool:</b> <code>{pool_address}</code>\n"
+            f"<b>Position:</b> <code>{pos_addr}</code>\n"
+            f"<b>Yatırılan:</b> {deposit_sol:.5f} SOL\n"
+            f"<b>Strateji:</b> {strategy.upper()}\n"
+            f"<b>Geri Alınabilir Kira:</b> {open_res.get('refundable_rent', refundable_rent):.5f} SOL\n"
+            f"<b>Aralık Bins:</b> {open_res.get('lower_bin', range_check.get('lower_bin'))} - {open_res.get('upper_bin', range_check.get('active_bin'))}\n"
+            f"🔗 <a href='https://gmgn.ai/sol/token/{token_address}'>View on GMGN</a>"
+        )
+        send_telegram(config, msg)
+    else:
+        err = open_res.get("error", "Unknown error")
+        send_telegram(config, f"❌ Hata: Pozisyon on-chain açılamadı: <code>{err}</code>")
 
 # ─── Startup Position Audit ───────────────────────────────────
 def startup_position_audit(config, state):
