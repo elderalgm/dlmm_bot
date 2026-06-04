@@ -96,7 +96,7 @@ def run_bridge(cmd_args):
         return {"success": False, "error": str(e)}
 
 # Telegram Notification
-def send_telegram(config, text):
+def send_telegram(config, text, reply_markup=None):
     token = config.get("telegram_token")
     chat_id = config.get("chat_id")
     if not token or not chat_id or token.startswith("YOUR_"):
@@ -109,6 +109,8 @@ def send_telegram(config, text):
         "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
@@ -554,6 +556,247 @@ def monitor_positions(config, state):
                 else:
                     logging.error(f"Failed to liquidate position: {close_res.get('error')}")
 
+# ─── Telegram Command Handler ─────────────────────────────────
+TELEGRAM_UPDATE_OFFSET = 0
+
+def check_telegram_commands(config, state):
+    global TELEGRAM_UPDATE_OFFSET
+    token = config.get("telegram_token")
+    chat_id_expected = str(config.get("chat_id"))
+    
+    if not token or token.startswith("YOUR_"):
+        return
+        
+    url = f"https://api.telegram.org/bot{token}/getUpdates"
+    params = {"offset": TELEGRAM_UPDATE_OFFSET + 1, "timeout": 2}
+    
+    try:
+        res = requests.get(url, params=params, timeout=5)
+        if res.status_code != 200:
+            return
+        data = res.json()
+        if not data.get("ok"):
+            return
+            
+        for update in data.get("result", []):
+            TELEGRAM_UPDATE_OFFSET = update["update_id"]
+            
+            # Handle Inline Keyboard Callback Queries
+            if "callback_query" in update:
+                cb = update["callback_query"]
+                cb_data = cb.get("data", "")
+                cb_id = cb.get("id")
+                chat_id = str(cb.get("message", {}).get("chat", {}).get("id", ""))
+                
+                if chat_id != chat_id_expected:
+                    continue
+                    
+                # Answer callback query to stop loading spinner
+                try:
+                    requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", json={"callback_query_id": cb_id})
+                except Exception:
+                    pass
+                    
+                if cb_data.startswith("close_"):
+                    token_address = cb_data.split("_", 1)[1]
+                    handle_telegram_close_position(config, state, token_address)
+                continue
+                
+            message = update.get("message", {})
+            text = message.get("text", "").strip()
+            chat_id = str(message.get("chat", {}).get("id", ""))
+            
+            if chat_id != chat_id_expected:
+                continue
+                
+            # Parse text command
+            cmd = text.lower()
+            if cmd in ["/start", "start", "menu", "help"]:
+                send_telegram_menu(config)
+            elif cmd in ["/status", "📊 status"]:
+                handle_telegram_status(config, state)
+            elif cmd in ["/positions", "📈 active positions"]:
+                handle_telegram_positions(config, state)
+            elif cmd in ["/history", "📋 history"]:
+                handle_telegram_history(config, state)
+            elif cmd.startswith("/close_"):
+                # Handle /close_tokenaddress direct text command
+                token_address = text.split("_", 1)[1]
+                handle_telegram_close_position(config, state, token_address)
+                
+    except Exception as e:
+        logging.error(f"Error processing telegram commands: {e}")
+
+def send_telegram_menu(config):
+    menu_keyboard = {
+        "keyboard": [
+            [{"text": "📊 Status"}, {"text": "📈 Active Positions"}],
+            [{"text": "📋 History"}]
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False
+    }
+    msg = (
+        "🤖 <b>Meteora DLMM Standalone Bot Menu</b>\n\n"
+        "Aşağıdaki butonları veya komutları kullanarak botu yönetebilirsiniz:\n"
+        "• <b>📊 Status</b>: Cüzdan bakiyesi, bot durumu ve parametreler.\n"
+        "• <b>📈 Active Positions</b>: Açık olan DLMM pozisyonları ve anlık durumları.\n"
+        "• <b>📋 History</b>: Son 5 kapatılan işlemin detayları."
+    )
+    send_telegram(config, msg, reply_markup=menu_keyboard)
+
+def handle_telegram_status(config, state):
+    # Fetch balance
+    bal_res = run_bridge(["get-balance"])
+    balance_str = f"{bal_res.get('balance', 0.0):.4f} SOL" if bal_res.get("success") else "Error"
+    
+    dry_run = config.get("dry_run", True)
+    mode_str = "🧪 DRY RUN (Simülasyon)" if dry_run else "🟢 LIVE TRADING (Gerçek)"
+    
+    msg = (
+        "📊 <b>BOT DURUM RAPORU</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Çalışma Modu:</b> {mode_str}\n"
+        f"<b>Cüzdan Bakiyesi:</b> <code>{balance_str}</code>\n"
+        f"<b>Aktif Pozisyon Sayısı:</b> {len(state.get('active_positions', {}))}\n"
+        f"<b>Gaz Rezervi:</b> {config.get('gas_reserve', 0.05)} SOL\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "<b>Tarama Kriterleri:</b>\n"
+        f"• Min TVL: ${config.get('min_tvl', 15000):,}\n"
+        f"• Min Bin Step: {config.get('min_bin_step', 80)}\n"
+        f"• Min Base Fee: %{config.get('min_base_fee_pct', 2.0)}"
+    )
+    send_telegram(config, msg)
+
+def handle_telegram_positions(config, state):
+    positions = state.get("active_positions", {})
+    if not positions:
+        send_telegram(config, "📂 <b>Aktif pozisyon bulunmamaktadır.</b>")
+        return
+        
+    for addr, pos in positions.items():
+        symbol = pos.get("symbol", "UNKNOWN")
+        pool = pos.get("pool_address", "UNKNOWN")
+        pos_addr = pos.get("position_address", "UNKNOWN")
+        deposit = pos.get("deposit_sol", 0.0)
+        
+        # Check range dynamically
+        range_res = run_bridge(["check-range", pool])
+        if range_res.get("success"):
+            active_bin = range_res.get("active_bin")
+            upper_bin = pos.get("upper_bin")
+            lower_bin = pos.get("lower_bin")
+            
+            # Check range status
+            if active_bin is not None and active_bin > upper_bin:
+                status_str = "🔴 Out-of-Range (Yukarı)"
+            elif active_bin is not None and active_bin < lower_bin:
+                status_str = "🔴 Out-of-Range (Aşağı)"
+            else:
+                status_str = "🟢 In-Range (Aktif)"
+                
+            active_price = range_res.get("active_price", 0.0)
+            price_details = f"Anlık Fiyat: {active_price:.6f} SOL/Lamport"
+        else:
+            status_str = "⚠️ Menzil Bilgisi Alınamadı"
+            price_details = "Meteora on-chain verisi çekilemedi."
+            active_bin = "N/A"
+            lower_bin = pos.get("lower_bin", "N/A")
+            upper_bin = pos.get("upper_bin", "N/A")
+            
+        msg = (
+            f"📈 <b>POZİSYON: {symbol}</b>\n"
+            f"<code>{addr}</code>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Yatırılan Tutar:</b> {deposit:.4f} SOL\n"
+            f"<b>Menzil Durumu:</b> {status_str}\n"
+            f"<b>Alt Bin:</b> {lower_bin} | <b>Üst Bin:</b> {upper_bin}\n"
+            f"<b>Aktif Bin:</b> {active_bin}\n"
+            f"<b>Detay:</b> {price_details}\n"
+            "━━━━━━━━━━━━━━━━━━"
+        )
+        
+        # Add Inline keyboard button to manually close the position
+        inline_keyboard = {
+            "inline_keyboard": [
+                [{"text": "🚨 Pozisyonu Kapat & SOL'e Çevir", "callback_data": f"close_{addr}"}]
+            ]
+        }
+        send_telegram(config, msg, reply_markup=inline_keyboard)
+
+def handle_telegram_history(config, state):
+    history = state.get("history", [])
+    if not history:
+        send_telegram(config, "📂 <b>İşlem geçmişi bulunmamaktadır.</b>")
+        return
+        
+    msg_lines = ["📋 <b>SON 5 İŞLEM GEÇMİŞİ</b>\n━━━━━━━━━━━━━━━━━━"]
+    # Show last 5 closed positions
+    for pos in reversed(history[-5:]):
+        symbol = pos.get("symbol", "UNKNOWN")
+        deposit = pos.get("deposit_sol", 0.0)
+        reason = pos.get("reason", "N/A")
+        
+        # Human readable date
+        closed_at_ts = pos.get("closed_at", 0)
+        closed_at = time.strftime('%H:%M:%S', time.localtime(closed_at_ts)) if closed_at_ts else "N/A"
+        
+        line = (
+            f"• <b>{symbol}</b> | Giriş: {deposit:.3f} SOL\n"
+            f"  Zaman: {closed_at} | Sebep: <code>{reason}</code>\n"
+        )
+        msg_lines.append(line)
+        
+    send_telegram(config, "\n".join(msg_lines))
+
+def handle_telegram_close_position(config, state, token_address):
+    positions = state.get("active_positions", {})
+    if token_address not in positions:
+        send_telegram(config, f"❌ Hata: <code>{token_address}</code> adresine ait açık bir pozisyon bulunamadı.")
+        return
+        
+    pos = positions[token_address]
+    symbol = pos.get("symbol", "UNKNOWN")
+    pool = pos.get("pool_address", "UNKNOWN")
+    pos_addr = pos.get("position_address", "UNKNOWN")
+    
+    send_telegram(config, f"⏳ <b>{symbol}</b> pozisyonu on-chain kapatılıyor ve swap işlemi başlatılıyor...")
+    
+    # Execute close position on-chain
+    close_res = run_bridge(["close", pool, pos_addr])
+    if close_res.get("success") or close_res.get("dry_run"):
+        token_x_amount = close_res.get("token_x_amount", 0.0)
+        token_x_mint = close_res.get("token_x_mint")
+        
+        swap_res = {"success": True, "tx": "N/A"}
+        if token_x_amount > 0 and token_x_mint:
+            # Swap token X back to SOL
+            swap_res = run_bridge(["swap", token_x_mint, "SOL", f"{token_x_amount:.8f}"])
+            
+        # Update state
+        del state["active_positions"][token_address]
+        state["history"].append({
+            "token_address": token_address,
+            "symbol": symbol,
+            "pool_address": pool,
+            "position_address": pos_addr,
+            "deposit_sol": pos.get("deposit_sol", 0.0),
+            "closed_at": time.time(),
+            "reason": "manual_telegram_request"
+        })
+        save_state(state)
+        
+        msg = (
+            f"🚨 <b>POZİSYON MANUEL KAPATILDI: {symbol}</b>\n"
+            f"Pozisyon başarıyla geri çekildi ve SOL swap işlemi tamamlandı.\n\n"
+            f"<b>Çekilen Tutar:</b> {token_x_amount:.4f} {symbol}\n"
+            f"<b>Swap Tx:</b> <code>{swap_res.get('tx', 'N/A')}</code>"
+        )
+        send_telegram(config, msg)
+    else:
+        error_msg = close_res.get("error", "Unknown error")
+        send_telegram(config, f"❌ Hata: Pozisyon kapatılamadı: <code>{error_msg}</code>")
+
 # ─── Main Bot Loop ────────────────────────────────────────────
 def main():
     logging.info("🤖 DLMM Trading Bot starting...")
@@ -561,13 +804,23 @@ def main():
     state = load_state()
     
     # Send start message
-    send_telegram(config, "🤖 <b>Meteora DLMM Trading Bot Started</b>\nMonitoring GMGN filters and positions 24/7.")
+    send_telegram_menu(config)
     
     last_token_scan = 0
     last_monitor_tick = 0
+    last_telegram_tick = 0
     
     while True:
         now = time.time()
+        
+        # Check Telegram commands every 5 seconds
+        if now - last_telegram_tick >= 5:
+            try:
+                config = load_config() # Reload config dynamically
+                check_telegram_commands(config, state)
+            except Exception as e:
+                logging.error(f"Error in telegram commands loop: {e}")
+            last_telegram_tick = time.time()
         
         # Scan for new tokens every 60 seconds
         if now - last_token_scan >= 60:
