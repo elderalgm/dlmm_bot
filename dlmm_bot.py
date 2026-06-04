@@ -672,6 +672,151 @@ def monitor_positions(config, state):
 # ─── Telegram Command Handler ─────────────────────────────────
 TELEGRAM_UPDATE_OFFSET = 0
 
+def handle_telegram_candidates(config, state):
+    send_telegram(config, "🔍 <b>GMGN aday tokenleri taranıyor...</b>\nBu işlem birkaç saniye sürebilir.")
+    
+    query = build_auth_query(config)
+    query["chain"] = "sol"
+    query["interval"] = "24h"
+    query["limit"] = "100"
+    query["direction"] = "desc"
+    query["orderby"] = "volume"
+    
+    headers = {
+        "X-APIKEY": config["gmgn_api_key"],
+        "Content-Type": "application/json"
+    }
+    
+    url = f"{HOST}/v1/market/rank"
+    try:
+        res = requests.get(url, params=query, headers=headers, timeout=15)
+        res.raise_for_status()
+        data = res.json()
+        if data.get("code") != 0:
+            send_telegram(config, f"❌ GMGN API Hatası: {data.get('msg', 'Bilinmeyen Hata')}")
+            return
+            
+        tokens = data.get("data", {}).get("rank", [])
+        now = time.time()
+        candidates = []
+        
+        for t in tokens:
+            address = t.get("address")
+            symbol = t.get("symbol", "UNKNOWN")
+            
+            # Skip if already holding a position
+            if address in state.get("active_positions", {}):
+                continue
+                
+            # Apply Safety Filters
+            renounced_mint = t.get("renounced_mint", 0)
+            renounced_freeze = t.get("renounced_freeze_account", 0)
+            if renounced_mint != 1 or renounced_freeze != 1:
+                continue
+                
+            creation_timestamp = t.get("creation_timestamp", now)
+            if now - creation_timestamp < 2 * 3600: # 2 hours
+                continue
+                
+            market_cap = t.get("market_cap", 0)
+            if market_cap < 250_000:
+                continue
+                
+            volume = t.get("volume", 0)
+            if volume < 1_000_000:
+                continue
+                
+            gas_fee = t.get("gas_fee", 0)
+            if gas_fee < 30:
+                continue
+                
+            holder_count = t.get("holder_count", 0)
+            if holder_count < 900:
+                continue
+                
+            if t.get("top_10_holder_rate", 1.0) > 0.30:
+                continue
+            if t.get("dev_team_hold_rate", 1.0) > 0.05:
+                continue
+            if t.get("bundler_rate", 1.0) > 0.68:
+                continue
+            if t.get("entrapment_ratio", 1.0) > 0.30:
+                continue
+            if t.get("rug_ratio", 1.0) > 0.50:
+                continue
+                
+            ath_mcap = t.get("history_highest_market_cap", 0)
+            
+            # If it passes safety, it's a candidate! Let's check indicators
+            reason = ""
+            if market_cap < ath_mcap * 0.80:
+                reason = "❌ ATH Yakınlığı Yetersiz"
+            else:
+                klines = get_kline_data(config, address)
+                df = calculate_indicators(klines)
+                if df is None:
+                    reason = "❌ Kline Alınamadı"
+                else:
+                    last_candle = df.iloc[-1]
+                    if last_candle.get("ST_dir", -1) != 1:
+                        reason = "❌ Supertrend Kırmızı"
+                    else:
+                        breakout_idx = None
+                        for idx in range(-min(50, len(df)), -1):
+                            c = df.iloc[idx]
+                            prev_max = df.iloc[:idx]['high'].max()
+                            if c['close'] > prev_max and c['volume'] > df.iloc[idx-10:idx]['volume'].mean() * 1.5:
+                                breakout_idx = idx
+                                break
+                        if breakout_idx is None:
+                            reason = "❌ ATH Kırılımı Yok"
+                        else:
+                            has_exit = False
+                            for idx in range(breakout_idx, 0):
+                                is_exit, _ = check_exit_signal(df, idx)
+                                if is_exit:
+                                    has_exit = True
+                                    break
+                            if has_exit:
+                                reason = "❌ Kırılımdan Sonra Çıkış Sinyali"
+                            else:
+                                pools = fetch_meteora_pools(address)
+                                selected_pool = select_best_pool(config, pools)
+                                if not selected_pool:
+                                    reason = "❌ Uygun Havuz Yok"
+                                else:
+                                    reason = "🟢 İşleme Giriş UYGUN!"
+            
+            candidates.append({
+                "symbol": symbol,
+                "address": address,
+                "mcap": market_cap,
+                "volume": volume,
+                "reason": reason
+            })
+            
+            if len(candidates) >= 10:
+                break
+                
+        if not candidates:
+            send_telegram(config, "🔍 <b>Aday Token Bulunamadı:</b> Güvenlik filtrelerini geçen hiçbir token yok.")
+            return
+            
+        msg_lines = ["🔍 <b>GÜVENLİK FİLTRELERİNİ GEÇEN ADAYLAR</b>\n━━━━━━━━━━━━━━━━━━"]
+        for idx, c in enumerate(candidates, 1):
+            line = (
+                f"{idx}. <b>{c['symbol']}</b> | MC: ${c['mcap']:,.0f} | Vol: ${c['volume']:,.0f}\n"
+                f"  Durum: <code>{c['reason']}</code>\n"
+                f"  🔗 <a href='https://gmgn.ai/sol/token/{c['address']}'>GMGN Linki</a>\n"
+            )
+            msg_lines.append(line)
+            
+        send_telegram(config, "\n".join(msg_lines))
+        
+    except Exception as e:
+        logging.error(f"Error fetching candidates: {e}")
+        send_telegram(config, f"❌ Hata: Aday listesi alınırken bir sorun oluştu: {str(e)}")
+
 def check_telegram_commands(config, state):
     global TELEGRAM_UPDATE_OFFSET
     token = config.get("telegram_token")
@@ -730,6 +875,8 @@ def check_telegram_commands(config, state):
                 handle_telegram_status(config, state)
             elif cmd in ["/positions", "📈 active positions"]:
                 handle_telegram_positions(config, state)
+            elif cmd in ["/candidates", "🔍 aday tokenler"]:
+                handle_telegram_candidates(config, state)
             elif cmd in ["/history", "📋 history"]:
                 handle_telegram_history(config, state)
             elif cmd in ["/toggle_mode", "🔄 mod değiştir", "🟢 canlı moda geç", "🧪 simülasyona geç"]:
@@ -764,8 +911,8 @@ def send_telegram_menu(config, state):
     menu_keyboard = {
         "keyboard": [
             [{"text": "📊 Status"}, {"text": "📈 Active Positions"}],
-            [{"text": mode_btn_text}, {"text": pause_btn_text}],
-            [{"text": "📋 History"}]
+            [{"text": "🔍 Aday Tokenler"}, {"text": "📋 History"}],
+            [{"text": mode_btn_text}, {"text": pause_btn_text}]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
@@ -781,6 +928,7 @@ def send_telegram_menu(config, state):
         "Aşağıdaki butonları kullanarak botu yönetebilirsiniz:\n"
         "• <b>📊 Status</b>: Durum raporu ve bakiye.\n"
         "• <b>📈 Active Positions</b>: Açık pozisyonlar ve manuel kapatma.\n"
+        "• <b>🔍 Aday Tokenler</b>: GMGN listesinden filtreleri geçen adaylar.\n"
         f"• <b>{mode_btn_text}</b>: Bot çalışma modunu değiştirir.\n"
         f"• <b>{pause_btn_text}</b>: Bot işlemlerini geçici olarak durdurur/başlatır.\n"
         "• <b>📋 History</b>: Son 5 kapatılan işlem."
