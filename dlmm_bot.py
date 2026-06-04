@@ -803,8 +803,9 @@ def handle_telegram_candidates(config, state):
                 "reason": reason
             })
             
-            if len(candidates) >= 10:
+            if len(candidates) >= 20:
                 break
+
                 
         if not candidates:
             send_telegram(config, "🔍 <b>Aday Token Bulunamadı:</b> Güvenlik filtrelerini geçen hiçbir token yok.")
