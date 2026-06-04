@@ -7,6 +7,7 @@ import logging
 import subprocess
 import requests
 import pandas as pd
+import html
 
 # Set console encoding to UTF-8 on Windows to prevent UnicodeEncodeError with emojis
 if sys.platform == "win32":
@@ -162,7 +163,9 @@ def send_telegram(config, text, reply_markup=None):
     if reply_markup:
         payload["reply_markup"] = reply_markup
     try:
-        requests.post(url, json=payload, timeout=10)
+        res = requests.post(url, json=payload, timeout=10)
+        if res.status_code != 200:
+            logging.error(f"Telegram API Error (Status {res.status_code}): {res.text}")
     except Exception as e:
         logging.error(f"Failed to send Telegram notification: {e}")
 
@@ -1539,7 +1542,7 @@ def handle_manual_buy_text(config, state, chat_id, text):
                     f"  • Durum: <code>{status_marker}</code>"
                 )
                 if failed:
-                    line += f" (<i>{', '.join(failed)}</i>)"
+                    line += f" (<i>{html.escape(', '.join(failed))}</i>)"
                 msg_lines.append(line + "\n")
                 
                 btn_text = f"{'⭐ ' if is_best else ''}Havuz {idx} ({status_marker})"
@@ -1620,7 +1623,7 @@ def handle_manual_buy_callback(config, state, chat_id, cb_data):
                 # Show filter bypass warning
                 session["step"] = "awaiting_filter_bypass"
                 
-                failed_str = "\n".join([f"• {r}" for r in failed_reasons])
+                failed_str = "\n".join([f"• {html.escape(r)}" for r in failed_reasons])
                 bypass_keyboard = {
                     "inline_keyboard": [
                         [
