@@ -7,7 +7,6 @@ import logging
 import subprocess
 import requests
 import pandas as pd
-import pandas_ta as ta
 
 # Set console encoding to UTF-8 on Windows to prevent UnicodeEncodeError with emojis
 if sys.platform == "win32":
@@ -132,32 +131,87 @@ def calculate_indicators(klines):
     for col in ['open', 'high', 'low', 'close', 'volume']:
         df[col] = df[col].astype(float)
         
-    df['RSI_2'] = ta.rsi(df['close'], length=2)
+    # Calculate RSI(2) using Wilder's EMA (RMA) logic
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/2, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/2, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    df['RSI_2'] = 100 - (100 / (1 + rs))
     
-    macd = ta.macd(df['close'])
-    if macd is not None and not macd.empty:
-        hist_col = [c for c in macd.columns if 'MACDh' in c][0]
-        df['MACD_hist'] = macd[hist_col]
-    else:
-        df['MACD_hist'] = 0.0
-
-    bbands = ta.bbands(df['close'], length=20, std=2)
-    if bbands is not None and not bbands.empty:
-        upper_bb_col = [c for c in bbands.columns if 'BBU' in c][0]
-        df['BB_upper'] = bbands[upper_bb_col]
-    else:
-        df['BB_upper'] = float('inf')
+    # Calculate MACD(12, 26, 9) histogram
+    ema_fast = df['close'].ewm(span=12, adjust=False).mean()
+    ema_slow = df['close'].ewm(span=26, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    macd_signal = macd_line.ewm(span=9, adjust=False).mean()
+    df['MACD_hist'] = macd_line - macd_signal
+    
+    # Calculate Bollinger Bands(20, 2) upper band
+    sma20 = df['close'].rolling(window=20).mean()
+    std20 = df['close'].rolling(window=20).std()
+    df['BB_upper'] = sma20 + (2 * std20)
+    df['BB_upper'] = df['BB_upper'].fillna(float('inf'))
+    
+    # Calculate Supertrend(10, 3)
+    # Calculate TR (True Range)
+    prev_close = df['close'].shift(1)
+    tr1 = df['high'] - df['low']
+    tr2 = (df['high'] - prev_close).abs()
+    tr3 = (df['low'] - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Wilder's ATR
+    atr = tr.ewm(alpha=1/10, adjust=False).mean()
+    
+    hl2 = (df['high'] + df['low']) / 2
+    basic_upper = hl2 + 3 * atr
+    basic_lower = hl2 - 3 * atr
+    
+    # Initialize Supertrend series
+    final_upper = basic_upper.copy()
+    final_lower = basic_lower.copy()
+    trend = pd.Series(1, index=df.index)
+    
+    for i in range(1, len(df)):
+        if pd.isna(atr.iloc[i]):
+            continue
+            
+        prev_upper = final_upper.iloc[i-1]
+        prev_lower = final_lower.iloc[i-1]
+        prev_close_val = df['close'].iloc[i-1]
+        prev_trend = trend.iloc[i-1]
         
-    st = ta.supertrend(df['high'], df['low'], df['close'], length=10, multiplier=3)
-    if st is not None and not st.empty:
-        dir_col = [c for c in st.columns if 'SUPERTd' in c][0]
-        val_col = [c for c in st.columns if c.startswith('SUPERT_')][0]
-        df['ST_dir'] = st[dir_col]
-        df['ST_val'] = st[val_col]
-    else:
-        df['ST_dir'] = 1
-        df['ST_val'] = 0.0
-        
+        # Upper Band
+        if basic_upper.iloc[i] < prev_upper or prev_close_val > prev_upper:
+            final_upper.iloc[i] = basic_upper.iloc[i]
+        else:
+            final_upper.iloc[i] = prev_upper
+            
+        # Lower Band
+        if basic_lower.iloc[i] > prev_lower or prev_close_val < prev_lower:
+            final_lower.iloc[i] = basic_lower.iloc[i]
+        else:
+            final_lower.iloc[i] = prev_lower
+            
+        # Trend direction
+        if df['close'].iloc[i] > final_upper.iloc[i]:
+            trend.iloc[i] = 1
+        elif df['close'].iloc[i] < final_lower.iloc[i]:
+            trend.iloc[i] = -1
+        else:
+            trend.iloc[i] = prev_trend
+            
+    st_val = pd.Series(0.0, index=df.index)
+    for i in range(len(df)):
+        if trend.iloc[i] == 1:
+            st_val.iloc[i] = final_lower.iloc[i]
+        else:
+            st_val.iloc[i] = final_upper.iloc[i]
+            
+    df['ST_dir'] = trend
+    df['ST_val'] = st_val
+    
     return df
 
 # ─── Signal Evaluation ────────────────────────────────────────
@@ -797,6 +851,78 @@ def handle_telegram_close_position(config, state, token_address):
         error_msg = close_res.get("error", "Unknown error")
         send_telegram(config, f"❌ Hata: Pozisyon kapatılamadı: <code>{error_msg}</code>")
 
+# ─── Startup Position Audit ───────────────────────────────────
+def startup_position_audit(config, state):
+    positions = state.get("active_positions", {})
+    if not positions:
+        logging.info("Startup Audit: No active positions found in state.")
+        return
+        
+    logging.info(f"Startup Audit: Auditing {len(positions)} active positions...")
+    send_telegram(config, "🔄 <b>Bot Başlatıldı:</b> Açık pozisyonlar ve çıkış sinyalleri denetleniyor...")
+    
+    now = time.time()
+    for token_address in list(positions.keys()):
+        pos = positions[token_address]
+        symbol = pos.get("symbol", "UNKNOWN")
+        pool_address = pos.get("pool_address")
+        position_address = pos.get("position_address")
+        
+        if not pool_address or not position_address:
+            continue
+            
+        logging.info(f"Startup Audit: Checking indicators for {symbol} ({token_address})...")
+        klines = get_kline_data(config, token_address)
+        df = calculate_indicators(klines)
+        
+        if df is not None:
+            is_exit, triggers = check_exit_signal(df)
+            if is_exit:
+                logging.info(f"🚨 Startup Audit: EXIT SIGNAL found on startup for {symbol}! Triggers: {triggers}. Liquidating immediately...")
+                send_telegram(config, f"🚨 <b>Başlangıç Denetimi:</b> {symbol} için 5m çıkış sinyali tespit edildi! Acil tasfiye ediliyor...")
+                
+                # Close Position
+                close_res = run_bridge(["close", pool_address, position_address])
+                if close_res.get("success") or close_res.get("dry_run"):
+                    token_x_amount = close_res.get("token_x_amount", 0.0)
+                    token_x_mint = close_res.get("token_x_mint")
+                    
+                    # Swap token X back to SOL
+                    swap_res = {"success": True, "tx": "N/A"}
+                    if token_x_amount > 0 and token_x_mint:
+                        logging.info(f"Swapping {token_x_amount} {symbol} back to SOL...")
+                        swap_res = run_bridge(["swap", token_x_mint, "SOL", f"{token_x_amount:.8f}"])
+                        
+                    # Save to state history
+                    del state["active_positions"][token_address]
+                    state["history"].append({
+                        "token_address": token_address,
+                        "symbol": symbol,
+                        "pool_address": pool_address,
+                        "position_address": position_address,
+                        "deposit_sol": pos.get("deposit_sol", 0.0),
+                        "closed_at": now,
+                        "reason": f"startup_audit_exit: {', '.join(triggers)}"
+                    })
+                    save_state(state)
+                    
+                    msg = (
+                        f"🚨 <b>BAŞLANGIÇTA ACİL TASFİYE TAMAMLANDI: {symbol}</b>\n"
+                        f"Bot açılışında çıkış sinyali tespit edilerek pozisyon kapatıldı.\n\n"
+                        f"<b>Tetikleyiciler:</b> {', '.join(triggers)}\n"
+                        f"<b>Swap Tx:</b> <code>{swap_res.get('tx', 'N/A')}</code>"
+                    )
+                    send_telegram(config, msg)
+                else:
+                    err = close_res.get("error", "Unknown error")
+                    logging.error(f"Failed to liquidate {symbol} on startup: {err}")
+                    send_telegram(config, f"❌ Hata: {symbol} başlangıçta kapatılamadı: <code>{err}</code>")
+            else:
+                logging.info(f"Startup Audit: {symbol} is safe. No exit signal on startup.")
+                send_telegram(config, f"🟢 <b>Başlangıç Denetimi:</b> {symbol} güvenli (çıkış sinyali yok).")
+        else:
+            logging.warning(f"Startup Audit: Could not fetch indicators for {symbol}.")
+
 # ─── Main Bot Loop ────────────────────────────────────────────
 def main():
     logging.info("🤖 DLMM Trading Bot starting...")
@@ -805,6 +931,12 @@ def main():
     
     # Send start message
     send_telegram_menu(config)
+    
+    # Run startup position audit before starting main loop
+    try:
+        startup_position_audit(config, state)
+    except Exception as e:
+        logging.error(f"Error in startup position audit: {e}")
     
     last_token_scan = 0
     last_monitor_tick = 0

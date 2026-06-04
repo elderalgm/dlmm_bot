@@ -31,6 +31,23 @@ def run_http_server():
     logging.info(f"Health check HTTP server started on port {PORT}")
     httpd.serve_forever()
 
+def get_python_executable():
+    # If a virtual environment Python exists (e.g. Render installs to .venv), use it!
+    # Linux (Render): .venv/bin/python
+    # Windows (Local): .venv/Scripts/python.exe
+    venv_linux = os.path.join(".venv", "bin", "python")
+    venv_windows = os.path.join(".venv", "Scripts", "python.exe")
+    
+    if os.path.exists(venv_linux):
+        logging.info(f"Using virtualenv python: {venv_linux}")
+        return venv_linux
+    elif os.path.exists(venv_windows):
+        logging.info(f"Using virtualenv python: {venv_windows}")
+        return venv_windows
+        
+    logging.info(f"Using system python: {sys.executable}")
+    return sys.executable
+
 def main():
     logging.info("Starting DLMM Standalone 24/7 Server...")
     
@@ -38,16 +55,18 @@ def main():
     http_thread = threading.Thread(target=run_http_server, daemon=True)
     http_thread.start()
     
+    python_path = get_python_executable()
+    
     # Start bot.py as subprocess
     logging.info("Launching dlmm_bot.py...")
-    bot_process = subprocess.Popen([sys.executable, "dlmm_bot.py"])
+    bot_process = subprocess.Popen([python_path, "dlmm_bot.py"])
     
     try:
         while True:
             bot_poll = bot_process.poll()
             if bot_poll is not None:
                 logging.error(f"dlmm_bot.py stopped unexpectedly! Restarting...")
-                bot_process = subprocess.Popen([sys.executable, "dlmm_bot.py"])
+                bot_process = subprocess.Popen([python_path, "dlmm_bot.py"])
             time.sleep(10)
     except KeyboardInterrupt:
         logging.info("Shutting down processes...")
