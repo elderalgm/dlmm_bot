@@ -387,45 +387,22 @@ def get_safe_tvl(p):
 
 def select_best_pool(config, pools):
     eligible_pools = []
-    
-    min_tvl = config.get("min_tvl", 15000)
-    min_bin_step = config.get("min_bin_step", 80)
-    min_fee = config.get("min_base_fee_pct", 2.0)
-    
     for p in pools:
-        cfg = p.get("pool_config") or {}
-        tvl = get_safe_tvl(p)
-        
-        bin_step = cfg.get("bin_step", 0)
-        try:
-            bin_step = int(bin_step or 0)
-        except (ValueError, TypeError):
-            bin_step = 0
-            
-        base_fee = cfg.get("base_fee_pct", 0)
-        try:
-            base_fee = float(base_fee or 0.0)
-        except (ValueError, TypeError):
-            base_fee = 0.0
-            
-        collect_fee_mode = cfg.get("collect_fee_mode", -1)
-        try:
-            collect_fee_mode = int(collect_fee_mode or -1)
-        except (ValueError, TypeError):
-            collect_fee_mode = -1
-        
-        # Filters: TVL, Mode 1 (SOL fees), Bin Step, Base Fee
-        if (tvl >= min_tvl and
-            collect_fee_mode == 1 and
-            bin_step >= min_bin_step and
-            base_fee >= min_fee):
+        passed, _ = check_pool_filters(config, p)
+        if passed:
             eligible_pools.append(p)
             
     if not eligible_pools:
         return None
     
-    # Select highest TVL pool
-    eligible_pools.sort(key=lambda x: get_safe_tvl(x), reverse=True)
+    # Sort eligible pools: first prefer pools meeting TVL >= min_tvl, then by TVL descending
+    min_tvl = config.get("min_tvl", 15000)
+    def pool_sort_key(p):
+        tvl = get_safe_tvl(p)
+        meets_tvl = 1 if tvl >= min_tvl else 0
+        return (meets_tvl, tvl)
+        
+    eligible_pools.sort(key=pool_sort_key, reverse=True)
     return eligible_pools[0]
 
 # ─── Main Bot Logic ───────────────────────────────────────────
@@ -643,9 +620,9 @@ def monitor_positions(config, state):
         range_check = run_bridge(["check-range", pool_address])
         if range_check.get("success"):
             active_bin = range_check.get("active_bin")
-            upper_bin = pos["upper_bin"]
+            upper_bin = pos.get("upper_bin")
             
-            if active_bin is not None and active_bin > upper_bin:
+            if active_bin is not None and upper_bin is not None and active_bin > upper_bin:
                 logging.info(f"🔔 REBALANCE: Price went Upward Out-of-Range for {symbol} (active_bin {active_bin} > upper_bin {upper_bin}). Closing and rebalancing...")
                 
                 # Close Position
@@ -1116,9 +1093,9 @@ def handle_telegram_positions(config, state):
             lower_bin = pos.get("lower_bin")
             
             # Check range status
-            if active_bin is not None and active_bin > upper_bin:
+            if active_bin is not None and upper_bin is not None and active_bin > upper_bin:
                 status_str = "🔴 Out-of-Range (Yukarı)"
-            elif active_bin is not None and active_bin < lower_bin:
+            elif active_bin is not None and lower_bin is not None and active_bin < lower_bin:
                 status_str = "🔴 Out-of-Range (Aşağı)"
             else:
                 status_str = "🟢 In-Range (Aktif)"
@@ -1311,6 +1288,8 @@ def process_range_selected(config, session, chat_id):
         return
         
     session["refundable_rent"] = range_check.get("refundable_rent", 0.25)
+    session["lower_bin"] = range_check.get("lower_bin")
+    session["upper_bin"] = range_check.get("active_bin")
     
     # Get balance
     bal_check = run_bridge(["get-balance"])
@@ -1340,7 +1319,8 @@ def process_range_selected(config, session, chat_id):
         f"• <b>Cüzdan Bakiyesi:</b> {wallet_sol:.5f} SOL\n"
         f"• <b>Gaz Rezervi:</b> {gas_reserve:.5f} SOL\n"
         f"• <b>Maksimum Yatırılabilir SOL:</b> <code>{max_invest:.5f} SOL</code>\n\n"
-        f"Lütfen yatırmak istediğiniz net SOL miktarını yazın (örn: 0.05):"
+        f"Lütfen yatırmak istediğiniz net SOL miktarını <b>sohbete doğrudan yazın</b> (örn: <code>0.02</code>) "
+        f"veya aşağıdaki butona tıklayarak maksimum yatırılabilir SOL miktarını seçin:"
     )
     send_telegram(config, msg, reply_markup=amount_keyboard)
 
@@ -1352,6 +1332,9 @@ def show_buy_confirmation(config, session, chat_id):
     downside_pct = session["downside_pct"]
     strategy = session["strategy"]
     refundable_rent = session["refundable_rent"]
+    
+    dry_run = is_dry_run(config, load_state())
+    mode_str = "🧪 SIMULATION (Simülasyon - Gerçek İşlem Yapmaz)" if dry_run else "🟢 LIVE TRADING (Gerçek Canlı İşlem)"
     
     confirm_keyboard = {
         "inline_keyboard": [
@@ -1365,6 +1348,7 @@ def show_buy_confirmation(config, session, chat_id):
     msg = (
         f"⚠️ <b>MANUEL İŞLEM ONAYI</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>İşlem Modu:</b> <b>{mode_str}</b>\n"
         f"• <b>Token:</b> {symbol}\n"
         f"• <b>Havuz:</b> <code>{pool_address}</code>\n"
         f"• <b>Yatırılacak Tutar:</b> {deposit_sol:.5f} SOL\n"
@@ -1372,7 +1356,8 @@ def show_buy_confirmation(config, session, chat_id):
         f"• <b>Range:</b> -%{downside_pct}\n"
         f"• <b>Strateji:</b> {strategy.upper()}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"İşlemi onaylıyor musunuz?"
+        f"İşlemi onaylıyor musunuz?\n"
+        f"<i>(Çalışma modunu değiştirmek için menüdeki 'Mod Değiştir' butonunu veya /toggle_mode komutunu kullanabilirsiniz.)</i>"
     )
     send_telegram(config, msg, reply_markup=confirm_keyboard)
 
@@ -1402,8 +1387,8 @@ def execute_manual_buy(config, state, chat_id):
             "symbol": symbol,
             "pool_address": pool_address,
             "position_address": pos_addr,
-            "lower_bin": open_res.get("lower_bin"),
-            "upper_bin": open_res.get("upper_bin"),
+            "lower_bin": open_res.get("lower_bin") or session.get("lower_bin"),
+            "upper_bin": open_res.get("upper_bin") or session.get("upper_bin"),
             "deposit_sol": deposit_sol,
             "refundable_rent": open_res.get("refundable_rent", refundable_rent),
             "opened_at": time.time()
@@ -1461,15 +1446,19 @@ def check_pool_filters(config, p):
         
     failed = []
     if tvl < min_tvl:
-        failed.append(f"TVL Yetersiz (${tvl:,.0f} < ${min_tvl:,.0f})")
-    if collect_fee_mode != 1:
-        failed.append(f"Ücret Modu Hatalı (Mode={collect_fee_mode})")
-    if bin_step < min_bin_step:
-        failed.append(f"Bin Step Düşük ({bin_step} < {min_bin_step})")
-    if base_fee < min_fee:
-        failed.append(f"Base Fee Düşük (%{base_fee:.2f} < %{min_fee:.1f})")
+        failed.append(f"TVL Düşük (${tvl:,.0f} < ${min_tvl:,.0f})")
         
-    return len(failed) == 0, failed
+    core_failed = []
+    if collect_fee_mode != 1:
+        core_failed.append(f"Ücret Modu Hatalı (Mode={collect_fee_mode})")
+    if bin_step < min_bin_step:
+        core_failed.append(f"Bin Step Düşük ({bin_step} < {min_bin_step})")
+    if base_fee < min_fee:
+        core_failed.append(f"Base Fee Düşük (%{base_fee:.2f} < %{min_fee:.1f})")
+        
+    if core_failed:
+        return False, core_failed + failed
+    return True, failed
 
 def handle_manual_buy_text(config, state, chat_id, text):
     try:
@@ -1778,8 +1767,8 @@ def handle_telegram_buy_token(config, state, token_address, deposit_amount_overr
             "symbol": symbol,
             "pool_address": pool_address,
             "position_address": pos_addr,
-            "lower_bin": open_res.get("lower_bin", range_check.get("lower_bin")),
-            "upper_bin": open_res.get("upper_bin", range_check.get("active_bin")),
+            "lower_bin": open_res.get("lower_bin") or range_check.get("lower_bin"),
+            "upper_bin": open_res.get("upper_bin") or range_check.get("active_bin"),
             "deposit_sol": deposit_sol,
             "refundable_rent": open_res.get("refundable_rent", refundable_rent),
             "opened_at": time.time()
