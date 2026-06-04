@@ -1,0 +1,12 @@
+{
+  "rpc_url": "YOUR_SOLANA_RPC_URL",
+  "wallet_private_key": "YOUR_WALLET_PRIVATE_KEY_BASE58",
+  "telegram_token": "8294386833:AAHhZzW-7bWmXIeTJXSwLCgEX0VgzOnUBWo",
+  "chat_id": "1741438724",
+  "gmgn_api_key": "gmgn_bd2444c0472e8194980316c0ce4077f5",
+  "dry_run": true,
+  "gas_reserve": 0.05,
+  "min_tvl": 15000,
+  "min_bin_step": 80,
+  "min_base_fee_pct": 2.0
+}
