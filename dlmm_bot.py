@@ -70,14 +70,65 @@ def save_state(state):
     except Exception as e:
         logging.error(f"Failed to save state: {e}")
 
+def is_dry_run(config, state):
+    override = state.get("dry_run_override")
+    if override is not None:
+        return override
+    return config.get("dry_run", True)
+
+def is_paused(state):
+    return state.get("is_paused", False)
+
+def is_rpc_limit_exceeded(state):
+    credits_info = state.get("credits_tracked", {})
+    used = credits_info.get("used", 0)
+    # 900,000 credit limit (leaves a 100,000 buffer out of 1,000,000 free plan credits)
+    if used >= 900000:
+        return True
+    return False
+
 # Bridge Invoker
 def run_bridge(cmd_args):
+    # Track Helius RPC credit usage
+    try:
+        cost = 5
+        if cmd_args:
+            cmd = cmd_args[0]
+            if cmd == "check-range":
+                cost = 10
+            elif cmd in ["open", "close"]:
+                cost = 30
+            elif cmd == "swap":
+                cost = 20
+                
+        state = load_state()
+        current_month = time.strftime("%Y-%m")
+        if "credits_tracked" not in state:
+            state["credits_tracked"] = {"month": current_month, "used": 0}
+        if state["credits_tracked"].get("month") != current_month:
+            state["credits_tracked"] = {"month": current_month, "used": 0}
+        state["credits_tracked"]["used"] += cost
+        save_state(state)
+    except Exception as e:
+        logging.error(f"Failed to track credit usage: {e}")
+        
+    # Determine dry_run value dynamically and inject into environment
+    env = os.environ.copy()
+    try:
+        config = load_config()
+        state = load_state()
+        dry_run_val = is_dry_run(config, state)
+        env["DRY_RUN"] = "true" if dry_run_val else "false"
+    except Exception as e:
+        logging.error(f"Failed to determine dry_run for bridge env: {e}")
+
     try:
         res = subprocess.run(
             ["node", "meteora_bridge.js"] + cmd_args,
             capture_output=True,
             text=True,
-            timeout=45
+            timeout=45,
+            env=env
         )
         output = res.stdout.strip()
         # Look for the last line starting with { and ending with } to avoid warnings
@@ -322,6 +373,14 @@ def select_best_pool(config, pools):
 
 # ─── Main Bot Logic ───────────────────────────────────────────
 def check_tokens(config, state):
+    if is_paused(state):
+        logging.info("Bot is paused. Skipping token scanning.")
+        return
+        
+    if is_rpc_limit_exceeded(state):
+        logging.warning("Helius RPC monthly credit limit reached! Stopping new token scans.")
+        return
+
     logging.info("Scanning GMGN rank for tokens...")
     query = build_auth_query(config)
     query["chain"] = "sol"
@@ -666,13 +725,27 @@ def check_telegram_commands(config, state):
             # Parse text command
             cmd = text.lower()
             if cmd in ["/start", "start", "menu", "help"]:
-                send_telegram_menu(config)
+                send_telegram_menu(config, state)
             elif cmd in ["/status", "📊 status"]:
                 handle_telegram_status(config, state)
             elif cmd in ["/positions", "📈 active positions"]:
                 handle_telegram_positions(config, state)
             elif cmd in ["/history", "📋 history"]:
                 handle_telegram_history(config, state)
+            elif cmd in ["/toggle_mode", "🔄 mod değiştir", "🟢 canlı moda geç", "🧪 simülasyona geç"]:
+                current_val = is_dry_run(config, state)
+                state["dry_run_override"] = not current_val
+                save_state(state)
+                new_mode = "🧪 DRY RUN (Simülasyon)" if state["dry_run_override"] else "🟢 LIVE TRADING (Gerçek)"
+                send_telegram(config, f"🔄 <b>Mod Değiştirildi:</b> Çalışma modu artık <b>{new_mode}</b>.")
+                send_telegram_menu(config, state)
+            elif cmd in ["/toggle_pause", "⏸ durdur / başlat", "⏸ botu durdur", "▶️ botu başlat"]:
+                current_val = is_paused(state)
+                state["is_paused"] = not current_val
+                save_state(state)
+                status_str = "⏸ BOT DURDURULDU" if state["is_paused"] else "▶️ BOT BAŞLATILDI"
+                send_telegram(config, f"📢 <b>{status_str}</b>\nBot artık işlemlerini askıya aldı." if state["is_paused"] else f"📢 <b>{status_str}</b>\nBot normal işlemlerine devam ediyor.")
+                send_telegram_menu(config, state)
             elif cmd.startswith("/close_"):
                 # Handle /close_tokenaddress direct text command
                 token_address = text.split("_", 1)[1]
@@ -681,21 +754,36 @@ def check_telegram_commands(config, state):
     except Exception as e:
         logging.error(f"Error processing telegram commands: {e}")
 
-def send_telegram_menu(config):
+def send_telegram_menu(config, state):
+    is_p = is_paused(state)
+    pause_btn_text = "▶️ Botu Başlat" if is_p else "⏸ Botu Durdur"
+    
+    dry_r = is_dry_run(config, state)
+    mode_btn_text = "🟢 Canlı Moda Geç" if dry_r else "🧪 Simülasyona Geç"
+    
     menu_keyboard = {
         "keyboard": [
             [{"text": "📊 Status"}, {"text": "📈 Active Positions"}],
+            [{"text": mode_btn_text}, {"text": pause_btn_text}],
             [{"text": "📋 History"}]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
     }
+    
+    mode_str = "🧪 DRY RUN (Simülasyon)" if dry_r else "🟢 LIVE TRADING (Gerçek)"
+    status_str = "⏸ Durduruldu" if is_p else "▶️ Aktif (Çalışıyor)"
+    
     msg = (
-        "🤖 <b>Meteora DLMM Standalone Bot Menu</b>\n\n"
-        "Aşağıdaki butonları veya komutları kullanarak botu yönetebilirsiniz:\n"
-        "• <b>📊 Status</b>: Cüzdan bakiyesi, bot durumu ve parametreler.\n"
-        "• <b>📈 Active Positions</b>: Açık olan DLMM pozisyonları ve anlık durumları.\n"
-        "• <b>📋 History</b>: Son 5 kapatılan işlemin detayları."
+        "🤖 <b>Meteora DLMM Standalone Bot Menüsü</b>\n\n"
+        f"<b>Durum:</b> {status_str}\n"
+        f"<b>Mod:</b> {mode_str}\n\n"
+        "Aşağıdaki butonları kullanarak botu yönetebilirsiniz:\n"
+        "• <b>📊 Status</b>: Durum raporu ve bakiye.\n"
+        "• <b>📈 Active Positions</b>: Açık pozisyonlar ve manuel kapatma.\n"
+        f"• <b>{mode_btn_text}</b>: Bot çalışma modunu değiştirir.\n"
+        f"• <b>{pause_btn_text}</b>: Bot işlemlerini geçici olarak durdurur/başlatır.\n"
+        "• <b>📋 History</b>: Son 5 kapatılan işlem."
     )
     send_telegram(config, msg, reply_markup=menu_keyboard)
 
@@ -704,14 +792,25 @@ def handle_telegram_status(config, state):
     bal_res = run_bridge(["get-balance"])
     balance_str = f"{bal_res.get('balance', 0.0):.4f} SOL" if bal_res.get("success") else "Error"
     
-    dry_run = config.get("dry_run", True)
+    dry_run = is_dry_run(config, state)
     mode_str = "🧪 DRY RUN (Simülasyon)" if dry_run else "🟢 LIVE TRADING (Gerçek)"
+    
+    is_p = is_paused(state)
+    status_str = "⏸ Durduruldu" if is_p else "▶️ Aktif (Çalışıyor)"
+    
+    # RPC Credits
+    credits_info = state.get("credits_tracked", {})
+    used_credits = credits_info.get("used", 0)
+    limit = 900000
+    credits_status = "🔴 Limit Aşımı" if used_credits >= limit else "🟢 Normal"
     
     msg = (
         "📊 <b>BOT DURUM RAPORU</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Bot Durumu:</b> {status_str}\n"
         f"<b>Çalışma Modu:</b> {mode_str}\n"
         f"<b>Cüzdan Bakiyesi:</b> <code>{balance_str}</code>\n"
+        f"<b>Helius RPC Kullanımı:</b> {used_credits:,} / {limit:,} ({credits_status})\n"
         f"<b>Aktif Pozisyon Sayısı:</b> {len(state.get('active_positions', {}))}\n"
         f"<b>Gaz Rezervi:</b> {config.get('gas_reserve', 0.05)} SOL\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -930,7 +1029,7 @@ def main():
     state = load_state()
     
     # Send start message
-    send_telegram_menu(config)
+    send_telegram_menu(config, state)
     
     # Run startup position audit before starting main loop
     try:
