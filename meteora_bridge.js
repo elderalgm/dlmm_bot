@@ -2,7 +2,9 @@ const { Connection, PublicKey, Keypair, VersionedTransaction, Transaction, sendA
 const DLMM = require("@meteora-ag/dlmm");
 const { getBinArrayIndexesCoverage, getBinArrayKeysCoverage, getPositionRentExemption, StrategyType } = DLMM;
 const BN = require("bn.js");
-const bs58 = require("bs58");
+const bs58Import = require("bs58");
+const bs58 = bs58Import.default || bs58Import;
+
 const fs = require("fs");
 const path = require("path");
 

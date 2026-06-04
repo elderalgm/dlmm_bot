@@ -403,7 +403,11 @@ def check_tokens(config, state):
             logging.error(f"GMGN API Error: {data}")
             return
             
-        tokens = data.get("data", {}).get("rank", [])
+        inner_data = data.get("data", {})
+        if isinstance(inner_data, dict) and "data" in inner_data:
+            inner_data = inner_data["data"]
+        tokens = inner_data.get("rank", []) if isinstance(inner_data, dict) else []
+
         now = time.time()
         
         for t in tokens:
@@ -696,7 +700,11 @@ def handle_telegram_candidates(config, state):
             send_telegram(config, f"❌ GMGN API Hatası: {data.get('msg', 'Bilinmeyen Hata')}")
             return
             
-        tokens = data.get("data", {}).get("rank", [])
+        inner_data = data.get("data", {})
+        if isinstance(inner_data, dict) and "data" in inner_data:
+            inner_data = inner_data["data"]
+        tokens = inner_data.get("rank", []) if isinstance(inner_data, dict) else []
+
         now = time.time()
         candidates = []
         
