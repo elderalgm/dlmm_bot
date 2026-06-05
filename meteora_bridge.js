@@ -1,4 +1,4 @@
-const { Connection, PublicKey, Keypair, VersionedTransaction, Transaction, sendAndConfirmTransaction } = require("@solana/web3.js");
+const { Connection, PublicKey, Keypair, VersionedTransaction, Transaction, sendAndConfirmTransaction, ComputeBudgetProgram } = require("@solana/web3.js");
 const DLMM = require("@meteora-ag/dlmm");
 const { getBinArrayIndexesCoverage, getBinArrayKeysCoverage, getPositionRentExemption, StrategyType } = DLMM;
 const BN = require("bn.js");
@@ -40,6 +40,32 @@ function getWalletKeypair(config) {
     throw new Error("Wallet private key not configured in config.json");
   }
   return Keypair.fromSecretKey(bs58.decode(config.wallet_private_key));
+}
+
+async function sendAndConfirmTransactionWithFees(connection, tx, signers) {
+  if (tx.instructions) {
+    let hasComputeBudget = false;
+    for (const inst of tx.instructions) {
+      if (inst.programId.equals(ComputeBudgetProgram.programId)) {
+        hasComputeBudget = true;
+        break;
+      }
+    }
+    
+    if (!hasComputeBudget) {
+      const limitInst = ComputeBudgetProgram.setComputeUnitLimit({
+        units: 800000
+      });
+      const priceInst = ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: 1500000
+      });
+      tx.instructions.unshift(limitInst, priceInst);
+    }
+  }
+  return await sendAndConfirmTransaction(connection, tx, signers, {
+    commitment: "confirmed",
+    preflightCommitment: "confirmed"
+  });
 }
 
 // ─── Command: get-balance ─────────────────────────────────────
@@ -192,7 +218,7 @@ async function cmdOpen(config, poolAddressStr, amountSolStr, downsidePctStr, str
     const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
     for (let i = 0; i < createTxArray.length; i++) {
       const signers = i === 0 ? [wallet, newPosition] : [wallet];
-      const txHash = await sendAndConfirmTransaction(connection, createTxArray[i], signers);
+      const txHash = await sendAndConfirmTransactionWithFees(connection, createTxArray[i], signers);
       txHashes.push(txHash);
     }
     
@@ -207,7 +233,7 @@ async function cmdOpen(config, poolAddressStr, amountSolStr, downsidePctStr, str
     });
     const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
     for (let i = 0; i < addTxArray.length; i++) {
-      const txHash = await sendAndConfirmTransaction(connection, addTxArray[i], [wallet]);
+      const txHash = await sendAndConfirmTransactionWithFees(connection, addTxArray[i], [wallet]);
       txHashes.push(txHash);
     }
   } else {
@@ -220,7 +246,7 @@ async function cmdOpen(config, poolAddressStr, amountSolStr, downsidePctStr, str
       strategy: { minBinId: lowerBinId, maxBinId: activeBin.binId, strategyType },
       slippage: 1000 // 10%
     });
-    const txHash = await sendAndConfirmTransaction(connection, tx, [wallet, newPosition]);
+    const txHash = await sendAndConfirmTransactionWithFees(connection, tx, [wallet, newPosition]);
     txHashes.push(txHash);
   }
   
@@ -269,7 +295,7 @@ async function cmdClose(config, poolAddressStr, positionAddressStr) {
   const txHashes = [];
   const closeTxArray = Array.isArray(closeTx) ? closeTx : [closeTx];
   for (const tx of closeTxArray) {
-    const txHash = await sendAndConfirmTransaction(connection, tx, [wallet]);
+    const txHash = await sendAndConfirmTransactionWithFees(connection, tx, [wallet]);
     txHashes.push(txHash);
   }
   

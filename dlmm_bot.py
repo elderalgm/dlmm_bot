@@ -123,12 +123,17 @@ def run_bridge(cmd_args):
     except Exception as e:
         logging.error(f"Failed to determine dry_run for bridge env: {e}")
 
+    # Set timeout based on operation type: 90s for write ops, 45s for reads
+    timeout_sec = 45
+    if cmd_args and cmd_args[0] in ["open", "close", "swap", "swap-remaining-tokens"]:
+        timeout_sec = 90
+
     try:
         res = subprocess.run(
             ["node", "meteora_bridge.js"] + cmd_args,
             capture_output=True,
             text=True,
-            timeout=45,
+            timeout=timeout_sec,
             env=env
         )
         output = res.stdout.strip()
@@ -2257,10 +2262,15 @@ def main():
                 logging.error(f"Error in telegram commands loop: {e}")
             last_telegram_tick = time.time()
         
-        # Scan for new tokens every 60 seconds
+        # Scan for new tokens every 60 seconds (and sync state from blockchain first)
         if now - last_token_scan >= 60:
             try:
                 config = load_config() # Reload config dynamically
+                # Sync local state with actual on-chain positions (Self-Healing Loop)
+                try:
+                    reconstruct_state_from_chain(config, state)
+                except Exception as e:
+                    logging.error(f"Error in periodic state sync: {e}")
                 check_tokens(config, state)
             except Exception as e:
                 logging.error(f"Error in token scan loop: {e}")
