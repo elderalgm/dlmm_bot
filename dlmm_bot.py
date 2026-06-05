@@ -2256,6 +2256,7 @@ def main():
     last_token_scan = 0
     last_monitor_tick = 0
     last_telegram_tick = 0
+    last_state_sync = time.time() # Already synced on startup, wait 5m for next sync
     last_token_cleanup = time.time() - 550 # Run first check 50 seconds after startup
     
     while True:
@@ -2269,16 +2270,20 @@ def main():
             except Exception as e:
                 logging.error(f"Error in telegram commands loop: {e}")
             last_telegram_tick = time.time()
+            
+        # Sync local state with actual on-chain positions (Self-Healing Loop) every 5 minutes (300 seconds)
+        if now - last_state_sync >= 300:
+            try:
+                config = load_config() # Reload config dynamically
+                reconstruct_state_from_chain(config, state)
+            except Exception as e:
+                logging.error(f"Error in periodic state sync: {e}")
+            last_state_sync = time.time()
         
-        # Scan for new tokens every 60 seconds (and sync state from blockchain first)
+        # Scan for new tokens every 60 seconds
         if now - last_token_scan >= 60:
             try:
                 config = load_config() # Reload config dynamically
-                # Sync local state with actual on-chain positions (Self-Healing Loop)
-                try:
-                    reconstruct_state_from_chain(config, state)
-                except Exception as e:
-                    logging.error(f"Error in periodic state sync: {e}")
                 check_tokens(config, state)
             except Exception as e:
                 logging.error(f"Error in token scan loop: {e}")
