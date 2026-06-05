@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 
 # Public RPC fallback
-DEFAULT_RPC = "https://api.mainnet-beta.solana.com"
+DEFAULT_RPC = "https://rpc.ankr.com/solana"
 
 def load_config():
     config_path = "config.json"
@@ -24,19 +24,37 @@ def get_rpc_url(config):
         return DEFAULT_RPC
     return url
 
-def rpc_call(url, method, params):
+def rpc_call(primary_url, method, params):
+    urls = []
+    if primary_url and "YOUR_" not in primary_url:
+        urls.append(primary_url)
+    
+    fallbacks = [
+        "https://rpc.ankr.com/solana",
+        "https://solana.publicnode.com",
+        "https://api.mainnet-beta.solana.com"
+    ]
+    for fb in fallbacks:
+        if fb not in urls:
+            urls.append(fb)
+            
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
         "method": method,
         "params": params
     }
-    try:
-        res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=15)
-        if res.status_code == 200:
-            return res.json().get("result")
-    except Exception as e:
-        print(f"RPC Error calling {method}: {e}")
+    
+    for url in urls:
+        try:
+            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=8)
+            if res.status_code == 200:
+                result = res.json().get("result")
+                if result is not None:
+                    return result
+        except Exception:
+            pass
+        time.sleep(0.5)
     return None
 
 def main():
@@ -63,7 +81,10 @@ def main():
             pass
             
     if not wallet_address:
-        wallet_address = input("Lütfen analiz etmek istediğiniz Solana Cüzdan Adresini girin: ").strip()
+        if len(sys.argv) > 1:
+            wallet_address = sys.argv[1].strip()
+        else:
+            wallet_address = input("Lütfen analiz etmek istediğiniz Solana Cüzdan Adresini girin: ").strip()
         if not wallet_address:
             print("Hata: Geçersiz cüzdan adresi.")
             return
@@ -85,10 +106,12 @@ def main():
         block_time = sig_info.get("blockTime")
         dt_str = datetime.fromtimestamp(block_time).strftime('%Y-%m-%d %H:%M:%S') if block_time else "Bilinmiyor"
         
-        # Fetch transaction details
+        # Fetch transaction details with a delay to prevent public RPC rate limits
+        time.sleep(1.5)
         tx = rpc_call(rpc_url, "getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
         if not tx:
-            # Try again once
+            # Try again once after a longer sleep
+            time.sleep(3.0)
             tx = rpc_call(rpc_url, "getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
             
         if not tx:

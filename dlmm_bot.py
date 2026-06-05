@@ -848,8 +848,9 @@ def check_tokens(config, state):
             
             # Check range eligibility (uninitialized bin arrays) via bridge
             range_check = run_bridge(["check-range", pool_address])
-            if not range_check.get("success") or not range_check.get("eligible"):
-                logging.info(f"Skipping pool {pool_address} for {symbol} due to uninitialized bin arrays or rent cost.")
+            missing_arrays = range_check.get("missing_arrays", 0)
+            if not range_check.get("success") or not range_check.get("eligible") or missing_arrays > 0:
+                logging.info(f"Skipping pool {pool_address} for {symbol} due to uninitialized bin arrays ({missing_arrays}) or rent cost.")
                 continue
                 
             # ─── Open Position ────────────────────────────────────
@@ -1695,7 +1696,20 @@ def execute_manual_buy(config, state, chat_id):
     downside_pct = session["downside_pct"]
     strategy = session["strategy"]
     refundable_rent = session["refundable_rent"]
-    
+    # Final check: Ensure range is still eligible and no bin arrays are missing (prevent race conditions)
+    range_check = run_bridge(["check-range", pool_address, str(downside_pct)])
+    eligible = range_check.get("eligible", False)
+    missing_arrays = range_check.get("missing_arrays", 0)
+    if not range_check.get("success") or not eligible or missing_arrays > 0:
+        send_telegram(config, (
+            f"❌ <b>Hata (İşlem İptal Edildi):</b> Havuzda son saniyede initialize edilmemiş bin arrayleri tespit edildi!\n"
+            f"• <b>Eksik Array Sayısı:</b> {missing_arrays}\n\n"
+            f"Kayıp yaşamamanız için işlem güvenlik kuralı gereği son aşamada engellendi."
+        ))
+        if chat_id in manual_buy_sessions:
+            del manual_buy_sessions[chat_id]
+        return
+        
     send_telegram(config, f"🚀 <b>{symbol}</b> için on-chain pozisyon açılıyor...")
     
     open_res = run_bridge(["open", pool_address, f"{deposit_sol:.6f}", str(downside_pct), strategy])
