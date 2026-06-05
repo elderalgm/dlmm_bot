@@ -563,6 +563,10 @@ def check_tokens(config, state):
         logging.warning("Helius RPC monthly credit limit reached! Stopping new token scans.")
         return
 
+    if state.get("active_positions"):
+        logging.info("An active position is already open. Skipping token scanning to focus on the position.")
+        return
+
     logging.info("Scanning GMGN rank for tokens...")
     query = build_auth_query(config)
     query["chain"] = "sol"
