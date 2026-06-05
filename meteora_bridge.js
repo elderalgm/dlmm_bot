@@ -645,6 +645,20 @@ async function cmdSwapRemainingTokens(config) {
   return { success: true, swaps };
 }
 
+// ─── Command: get-active-bin ──────────────────────────────────
+async function cmdGetActiveBin(config, poolAddressStr) {
+  const connection = getSolanaConnection(config);
+  const poolPubKey = new PublicKey(poolAddressStr);
+  const pool = await DLMM.create(connection, poolPubKey);
+  const activeBin = await pool.getActiveBin();
+  const activePriceScaled = Number(pool.fromPricePerLamport(activeBin.price));
+  return {
+    success: true,
+    active_bin: activeBin.binId,
+    active_price: activePriceScaled
+  };
+}
+
 // ─── Entry Point ──────────────────────────────────────────────
 async function main() {
   const args = process.argv.slice(2);
@@ -664,6 +678,10 @@ async function main() {
     case "check-range":
       if (args.length < 2) throw new Error("Missing pool address for check-range");
       result = await cmdCheckRange(config, args[1], args[2]);
+      break;
+    case "get-active-bin":
+      if (args.length < 2) throw new Error("Missing pool address for get-active-bin");
+      result = await cmdGetActiveBin(config, args[1]);
       break;
     case "open":
       if (args.length < 3) throw new Error("Missing arguments for open: <pool_address> <amount_sol> [downside_pct] [strategy_type]");

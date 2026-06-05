@@ -97,6 +97,8 @@ def run_bridge(cmd_args):
             cmd = cmd_args[0]
             if cmd == "check-range":
                 cost = 10
+            elif cmd == "get-active-bin":
+                cost = 5
             elif cmd in ["open", "close"]:
                 cost = 30
             elif cmd == "swap":
@@ -228,7 +230,7 @@ def execute_close_and_swap(config, state, token_address, reason):
             
             # Simulated price change calculation
             price_detail_str = ""
-            range_res = run_bridge(["check-range", pool])
+            range_res = run_bridge(["get-active-bin", pool])
             if range_res.get("success"):
                 current_price = range_res.get("active_price", 0.0)
                 open_price = pos.get("open_price", 0.0)
@@ -918,7 +920,7 @@ def monitor_positions(config, state):
         position_address = pos["position_address"]
         
         # 1. Check if price is Upward Out-of-Range
-        range_check = run_bridge(["check-range", pool_address])
+        range_check = run_bridge(["get-active-bin", pool_address])
         if range_check.get("success"):
             active_bin = range_check.get("active_bin")
             upper_bin = pos.get("upper_bin")
@@ -1400,7 +1402,7 @@ def handle_telegram_positions(config, state):
         deposit = pos_state.get("deposit_sol", 0.0)
         
         # Check active price and range status dynamically
-        range_res = run_bridge(["check-range", pool])
+        range_res = run_bridge(["get-active-bin", pool])
         active_bin = None
         status_str = "⚠️ Menzil Bilgisi Alınamadı"
         range_bar = ""
@@ -2135,9 +2137,9 @@ def reconstruct_state_from_chain(config, state):
 
                 logging.info(f"🔄 Reconstructing missing state for active on-chain position: {symbol} ({token_address})")
                 
-                # Fetch current price from check-range as fallback for open_price
+                # Fetch current price from get-active-bin as fallback for open_price
                 open_price = 0.0
-                range_check = run_bridge(["check-range", ocp["pool_address"]])
+                range_check = run_bridge(["get-active-bin", ocp["pool_address"]])
                 if range_check.get("success"):
                     open_price = range_check.get("active_price", 0.0)
                     
@@ -2289,8 +2291,8 @@ def main():
                 logging.error(f"Error in token scan loop: {e}")
             last_token_scan = time.time()
             
-        # Monitor active positions every 15 seconds
-        if now - last_monitor_tick >= 15:
+        # Monitor active positions every 30 seconds
+        if now - last_monitor_tick >= 30:
             try:
                 monitor_positions(config, state)
             except Exception as e:
