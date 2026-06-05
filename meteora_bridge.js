@@ -452,6 +452,46 @@ async function cmdGetHeliusCredits(config) {
   };
 }
 
+// ─── Command: get-active-positions ─────────────────────────────
+async function cmdGetActivePositions(config) {
+  const connection = getSolanaConnection(config);
+  const wallet = getWalletKeypair(config);
+  
+  const positionsMap = await DLMM.getAllLbPairPositionsByUser(connection, wallet.publicKey);
+  const result = [];
+  
+  for (const [poolAddress, positionInfo] of positionsMap.entries()) {
+    try {
+      const positionPubKey = positionInfo.publicKey;
+      const poolPubKey = positionInfo.positionData.lbPair;
+      
+      const pool = await DLMM.create(connection, poolPubKey);
+      const tokenAddress = pool.lbPair.tokenXMint.toBase58();
+      const symbol = pool.tokenX.symbol;
+      
+      const lowerBin = positionInfo.positionData.lowerBinId;
+      const upperBin = positionInfo.positionData.upperBinId;
+      const totalBins = upperBin - lowerBin;
+      const rentLamports = await getPositionRentExemption(connection, new BN(totalBins));
+      const refundableRent = Number(rentLamports) / 1e9;
+      
+      result.push({
+        token_address: tokenAddress,
+        symbol: symbol,
+        pool_address: poolPubKey.toBase58(),
+        position_address: positionPubKey.toBase58(),
+        lower_bin: lowerBin,
+        upper_bin: upperBin,
+        refundable_rent: refundableRent
+      });
+    } catch (e) {
+      console.error(`Error parsing position:`, e.message);
+    }
+  }
+  
+  return { success: true, positions: result };
+}
+
 // ─── Command: swap-remaining-tokens ───────────────────────────
 async function cmdSwapRemainingTokens(config) {
   const connection = getSolanaConnection(config);
@@ -582,6 +622,9 @@ async function main() {
       break;
     case "swap-remaining-tokens":
       result = await cmdSwapRemainingTokens(config);
+      break;
+    case "get-active-positions":
+      result = await cmdGetActivePositions(config);
       break;
     default:
       throw new Error(`Unknown command: ${command}`);

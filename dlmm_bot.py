@@ -1858,6 +1858,72 @@ def handle_telegram_buy_token(config, state, token_address, deposit_amount_overr
         err = open_res.get("error", "Unknown error")
         send_telegram(config, f"❌ Hata: Pozisyon on-chain açılamadı: <code>{err}</code>")
 
+def reconstruct_state_from_chain(config, state):
+    logging.info("Checking blockchain for active positions to sync state...")
+    try:
+        res = run_bridge(["get-active-positions"])
+        if not res.get("success"):
+            logging.error(f"Failed to scan active positions from blockchain: {res.get('error')}")
+            return
+            
+        on_chain_positions = res.get("positions", [])
+        state_updated = False
+        
+        # 1. Add any position found on-chain that is not in state
+        for ocp in on_chain_positions:
+            token_address = ocp["token_address"]
+            if token_address not in state.get("active_positions", {}):
+                logging.info(f"🔄 Reconstructing missing state for active on-chain position: {ocp['symbol']} ({token_address})")
+                
+                # Fetch current price from check-range as fallback for open_price
+                open_price = 0.0
+                range_check = run_bridge(["check-range", ocp["pool_address"]])
+                if range_check.get("success"):
+                    open_price = range_check.get("active_price", 0.0)
+                    
+                state["active_positions"][token_address] = {
+                    "symbol": ocp["symbol"],
+                    "pool_address": ocp["pool_address"],
+                    "position_address": ocp["position_address"],
+                    "lower_bin": ocp["lower_bin"],
+                    "upper_bin": ocp["upper_bin"],
+                    "deposit_sol": 0.0, # Estimated as 0.0 since state was wiped
+                    "refundable_rent": ocp["refundable_rent"],
+                    "opened_at": time.time(),
+                    "open_price": open_price,
+                    "reconstructed": True
+                }
+                state_updated = True
+                
+                msg = (
+                    f"🔄 <b>ON-CHAIN POZİSYON KURTARILDI: {ocp['symbol']}</b>\n"
+                    f"Yerel durum verisi kaybolmuştu. Pozisyon zincir üzerinden otomatik olarak algılandı ve izleme listesine eklendi.\n\n"
+                    f"• <b>Menzil Bins:</b> {ocp['lower_bin']} - {ocp['upper_bin']}\n"
+                    f"• <b>Havuz:</b> <code>{ocp['pool_address']}</code>\n"
+                    f"• <b>Geri Alınabilir Kira:</b> {ocp['refundable_rent']:.5f} SOL\n\n"
+                    f"<i>(Başlangıç maliyeti kaybolduğu için PnL hesaplamasında maliyet 0 SOL + Escrow Kirası olarak varsayılacaktır.)</i>"
+                )
+                send_telegram(config, msg)
+                
+        # 2. Remove any position in state that is NOT found on-chain (clean up desynced/already-closed positions)
+        on_chain_addresses = {ocp["token_address"] for ocp in on_chain_positions}
+        for token_address in list(state.get("active_positions", {}).keys()):
+            # If the position was not reconstructed during this startup audit, check if it exists on-chain
+            # (Only do this for real trading mode, in dry_run mode on-chain positions don't exist so we skip cleaning them)
+            if not is_dry_run(config, state) and token_address not in on_chain_addresses:
+                # But don't clean it up if it was opened less than 2 minutes ago to prevent race conditions during transaction confirmation
+                opened_at = state["active_positions"][token_address].get("opened_at", 0)
+                if time.time() - opened_at > 120:
+                    logging.info(f"🧹 Removing desynced position from state: {state['active_positions'][token_address]['symbol']}")
+                    del state["active_positions"][token_address]
+                    state_updated = True
+                    
+        if state_updated:
+            save_state(state)
+            
+    except Exception as e:
+        logging.error(f"Error in reconstruct_state_from_chain: {e}")
+
 # ─── Startup Position Audit ───────────────────────────────────
 def startup_position_audit(config, state):
     positions = state.get("active_positions", {})
@@ -1915,6 +1981,12 @@ def main():
     # Send start message
     send_telegram_menu(config, state)
     
+    # Reconstruct/Sync state from on-chain positions before auditing
+    try:
+        reconstruct_state_from_chain(config, state)
+    except Exception as e:
+        logging.error(f"Error in reconstruct_state_from_chain: {e}")
+        
     # Run startup position audit before starting main loop
     try:
         startup_position_audit(config, state)
