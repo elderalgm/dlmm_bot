@@ -478,14 +478,34 @@ async function cmdGetActivePositions(config) {
       const poolPubKey = pos.account.lbPair;
       
       const pool = await DLMM.create(connection, poolPubKey);
-      const tokenAddress = pool.lbPair.tokenXMint.toBase58();
-      const symbol = (pool.tokenX && pool.tokenX.symbol) ? pool.tokenX.symbol : "UNKNOWN";
+      const mintX = pool.lbPair.tokenXMint.toBase58();
+      const mintY = pool.lbPair.tokenYMint.toBase58();
+      const wsolMint = "So11111111111111111111111111111111111111112";
+      
+      let tokenAddress = mintX;
+      let symbol = (pool.tokenX && pool.tokenX.symbol) ? pool.tokenX.symbol : "UNKNOWN";
+      
+      if (mintX === wsolMint) {
+        tokenAddress = mintY;
+        symbol = (pool.tokenY && pool.tokenY.symbol) ? pool.tokenY.symbol : "UNKNOWN";
+      }
       
       const lowerBin = pos.account.lowerBinId;
       const upperBin = pos.account.upperBinId;
       const totalBins = upperBin - lowerBin;
       const rentLamports = await getPositionRentExemption(connection, new BN(totalBins));
       const refundableRent = Number(rentLamports) / 1e9;
+      
+      const positionData = await pool.getPosition(positionPubKey);
+      const processed = positionData?.positionData;
+      let feeSol = 0;
+      if (processed) {
+        if (mintX === wsolMint) {
+          feeSol = Number(processed.feeX.toString()) / 1e9;
+        } else if (mintY === wsolMint) {
+          feeSol = Number(processed.feeY.toString()) / 1e9;
+        }
+      }
       
       result.push({
         token_address: tokenAddress,
@@ -494,7 +514,8 @@ async function cmdGetActivePositions(config) {
         position_address: positionPubKey.toBase58(),
         lower_bin: lowerBin,
         upper_bin: upperBin,
-        refundable_rent: refundableRent
+        refundable_rent: refundableRent,
+        fee_sol: feeSol
       });
     } catch (e) {
       console.error(`Error parsing position ${pos.publicKey.toBase58()}:`, e.message);

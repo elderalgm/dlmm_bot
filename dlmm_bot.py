@@ -264,7 +264,9 @@ def execute_close_and_swap(config, state, token_address, reason):
         # Human-readable Turkish notifications for exit reasons
         turkish_reasons = {
             "upward_out_of_range": "Fiyat Yukarı Menzil Dışı (Rebalance)",
-            "manual_telegram_request": "Manuel Telegram Kapatma Talebi"
+            "manual_telegram_request": "Manuel Kapatma",
+            "manual_telegram_request_confirm": "Manuel Kapatma (Onaylı)",
+            "manual_clean_remaining": "Periyodik Cüzdan Temizliği"
         }
         display_reason = reason
         if reason in turkish_reasons:
@@ -275,19 +277,38 @@ def execute_close_and_swap(config, state, token_address, reason):
             display_reason = f"Başlangıç Acil Tasfiyesi ({reason.split(':', 1)[1].strip()})"
             
         mode_str = "🧪 SIMULATION" if dry_run else "🟢 LIVE"
-        msg = (
-            f"🚨 <b>POZİSYON KAPATILDI ({mode_str}): {symbol}</b>\n"
-            f"<b>Sebep:</b> {display_reason}\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"<b>Yatırılan Tutar:</b> {deposit_sol:.5f} SOL\n"
-            f"<b>Geri Alınabilir Kira:</b> {refundable_rent:.5f} SOL\n"
-            f"<b>Toplam Maliyet:</b> {initial_spent:.5f} SOL\n"
-            f"<b>Geri Alınan Toplam:</b> {retrieved_sol:.5f} SOL\n"
-            f"<b>Kar/Zarar:</b> {pnl_str}\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"<b>Swap Tx:</b> <code>{swap_res.get('tx', 'N/A')}</code>"
-            f"{swap_failed_warning}"
-        )
+        
+        if dry_run:
+            pnl_val_str = pnl_str # Simulated price change calculation
+            msg = (
+                f"🚨 <b>POZİSYON KAPATILDI ({mode_str}): {symbol}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"<b>Sebep:</b> {display_reason}\n"
+                f"{pnl_val_str}"
+                f"━━━━━━━━━━━━━━━━━━"
+            )
+        else:
+            if deposit_sol <= 0.00001 or pos.get("reconstructed"):
+                deposit_sol_str = "Bilinmiyor (Reconstructed)"
+                pnl_val_str = "Bilinmiyor (Reconstructed)"
+            else:
+                deposit_sol_str = f"{deposit_sol:.5f} SOL"
+                pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+                pnl_sign = "+" if pnl >= 0 else ""
+                pnl_val_str = f"{pnl_emoji} {pnl_sign}{pnl:.5f} SOL ({pnl_sign}{pnl_pct:.2f}%)"
+                
+            msg = (
+                f"🚨 <b>POZİSYON KAPATILDI ({mode_str}): {symbol}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"<b>Sebep:</b> {display_reason}\n"
+                f"<b>Yatırılan:</b> {deposit_sol_str}\n"
+                f"<b>Alınan Toplam:</b> {retrieved_sol:.5f} SOL\n"
+                f"<b>Net Kar/Zarar:</b> {pnl_val_str}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"<b>Tx:</b> <code>{swap_res.get('tx', 'N/A')}</code>"
+                f"{swap_failed_warning}"
+            )
+            
         send_telegram(config, msg)
         return {"success": True}
     else:
@@ -349,6 +370,128 @@ def build_auth_query(config):
         "timestamp": int(time.time()),
         "client_id": str(uuid.uuid4())
     }
+
+def fetch_token_symbol_dex(token_address):
+    try:
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
+        res = requests.get(url, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            pairs = data.get("pairs", [])
+            if pairs:
+                for pair in pairs:
+                    base = pair.get("baseToken", {})
+                    if base.get("address", "").lower() == token_address.lower():
+                        return base.get("symbol", "").upper()
+                    quote = pair.get("quoteToken", {})
+                    if quote.get("address", "").lower() == token_address.lower():
+                        return quote.get("symbol", "").upper()
+    except Exception as e:
+        logging.warning(f"Could not fetch symbol from DexScreener: {e}")
+    return None
+
+def fetch_token_symbol(config, token_address):
+    # Try DexScreener first
+    sym = fetch_token_symbol_dex(token_address)
+    if sym:
+        return sym
+        
+    # Try GMGN as fallback
+    try:
+        url_info = f"{HOST}/v1/token/info/sol/{token_address}"
+        headers = {
+            "X-APIKEY": config["gmgn_api_key"],
+            "Content-Type": "application/json"
+        }
+        res_info = requests.get(url_info, params=build_auth_query(config), headers=headers, timeout=10)
+        if res_info.status_code == 200:
+            return res_info.json().get("data", {}).get("symbol", "UNKNOWN").upper()
+    except Exception as e:
+        logging.warning(f"Could not fetch symbol from GMGN: {e}")
+        
+    return "UNKNOWN"
+
+def fetch_token_market_cap_dex(token_address):
+    try:
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
+        res = requests.get(url, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            pairs = data.get("pairs", [])
+            if pairs:
+                pair = pairs[0]
+                mcap = pair.get("marketCap", pair.get("fdv", 0.0))
+                return float(mcap)
+    except Exception as e:
+        logging.warning(f"Could not fetch market cap from DexScreener: {e}")
+    return 0.0
+
+def fetch_token_market_cap(config, token_address):
+    # Try DexScreener first
+    mcap = fetch_token_market_cap_dex(token_address)
+    if mcap > 0.0:
+        return mcap
+        
+    # Try GMGN
+    try:
+        url_info = f"{HOST}/v1/token/info/sol/{token_address}"
+        headers = {
+            "X-APIKEY": config["gmgn_api_key"],
+            "Content-Type": "application/json"
+        }
+        res_info = requests.get(url_info, params=build_auth_query(config), headers=headers, timeout=10)
+        if res_info.status_code == 200:
+            return float(res_info.json().get("data", {}).get("market_cap", 0.0))
+    except Exception as e:
+        logging.warning(f"Could not fetch market cap from GMGN: {e}")
+    return 0.0
+
+def format_mcap(mcap):
+    if not mcap:
+        return "$0"
+    try:
+        mcap_val = float(mcap)
+        if mcap_val >= 1_000_000:
+            return f"${mcap_val / 1_000_000:.2f}M"
+        elif mcap_val >= 1_000:
+            return f"${mcap_val / 1_000:.1f}K"
+        else:
+            return f"${mcap_val:.0f}"
+    except Exception:
+        return "$0"
+
+def generate_range_bar(lower_bin, upper_bin, active_bin):
+    try:
+        lower = int(lower_bin)
+        upper = int(upper_bin)
+        active = int(active_bin)
+    except Exception:
+        return ""
+        
+    if active < lower:
+        return "🔴 <code>[🔴 ▬▬▬▬▬▬▬▬▬▬▬▬▬]</code> (Alt Sınır Altında)\n"
+    if active > upper:
+        return "<code>[▬▬▬▬▬▬▬▬▬▬▬▬▬ 🔴]</code> 🔴 (Üst Sınır Üstünde)\n"
+        
+    total = upper - lower
+    if total <= 0:
+        return ""
+        
+    relative = (active - lower) / total
+    bar_length = 13
+    index = int(round(relative * bar_length))
+    index = max(0, min(bar_length, index))
+    
+    bar_chars = []
+    for i in range(bar_length + 1):
+        if i == index:
+            bar_chars.append("🟢")
+        else:
+            bar_chars.append("▬")
+            
+    bar_str = "".join(bar_chars)
+    pct = int(relative * 100)
+    return f"<code>[{bar_str}]</code> ({pct}%)\n"
 
 # ─── Indicators Calculation ──────────────────────────────────
 def calculate_indicators(klines):
@@ -1027,7 +1170,7 @@ def check_telegram_commands(config, state):
                 else:
                     handle_manual_buy_text(config, state, chat_id, text)
                     continue
-            if cmd in ["/start", "start", "menu", "help"]:
+            if cmd in ["/start", "start", "menu", "/menu", "help", "/help"]:
                 send_telegram_menu(config, state)
             elif cmd in ["/status", "📊 status"]:
                 handle_telegram_status(config, state)
@@ -1168,57 +1311,127 @@ def handle_telegram_status(config, state):
     send_telegram(config, msg)
 
 def handle_telegram_positions(config, state):
-    positions = state.get("active_positions", {})
-    if not positions:
+    send_telegram(config, "🔍 <b>On-chain aktif pozisyonlar sorgulanıyor...</b>")
+    
+    # Query blockchain for live active positions
+    res = run_bridge(["get-active-positions"])
+    if not res.get("success"):
+        send_telegram(config, "❌ Hata: On-chain pozisyon bilgisi alınamadı.")
+        return
+        
+    on_chain_positions = res.get("positions", [])
+    if not on_chain_positions:
+        if state.get("active_positions"):
+            state["active_positions"] = {}
+            save_state(state)
         send_telegram(config, "📂 <b>Aktif pozisyon bulunmamaktadır.</b>")
         return
         
-    for addr, pos in positions.items():
-        symbol = pos.get("symbol", "UNKNOWN")
-        pool = pos.get("pool_address", "UNKNOWN")
-        pos_addr = pos.get("position_address", "UNKNOWN")
-        deposit = pos.get("deposit_sol", 0.0)
+    # Sync with local state
+    state_updated = False
+    active_positions_state = state.get("active_positions", {})
+    
+    for ocp in on_chain_positions:
+        addr = ocp["token_address"]
+        if addr in active_positions_state:
+            active_positions_state[addr]["lower_bin"] = ocp["lower_bin"]
+            active_positions_state[addr]["upper_bin"] = ocp["upper_bin"]
+            active_positions_state[addr]["refundable_rent"] = ocp["refundable_rent"]
+            active_positions_state[addr]["position_address"] = ocp["position_address"]
+            active_positions_state[addr]["pool_address"] = ocp["pool_address"]
+        else:
+            # Reconstruct missing position state
+            symbol = ocp.get("symbol", "UNKNOWN")
+            if symbol == "UNKNOWN":
+                symbol = fetch_token_symbol(config, addr)
+            active_positions_state[addr] = {
+                "symbol": symbol,
+                "pool_address": ocp["pool_address"],
+                "position_address": ocp["position_address"],
+                "lower_bin": ocp["lower_bin"],
+                "upper_bin": ocp["upper_bin"],
+                "deposit_sol": 0.0,
+                "refundable_rent": ocp["refundable_rent"],
+                "opened_at": time.time(),
+                "open_price": 0.0,
+                "reconstructed": True
+            }
+        state_updated = True
         
-        # Check range dynamically
+    # Clean up any closed positions from state
+    on_chain_addrs = {ocp["token_address"] for ocp in on_chain_positions}
+    for addr in list(active_positions_state.keys()):
+        if addr not in on_chain_addrs:
+            del active_positions_state[addr]
+            state_updated = True
+            
+    if state_updated:
+        state["active_positions"] = active_positions_state
+        save_state(state)
+        
+    # Display updated position data
+    for ocp in on_chain_positions:
+        addr = ocp["token_address"]
+        pos_state = active_positions_state.get(addr, {})
+        
+        symbol = pos_state.get("symbol", ocp.get("symbol", "UNKNOWN"))
+        if symbol == "UNKNOWN":
+            symbol = fetch_token_symbol(config, addr)
+            pos_state["symbol"] = symbol
+            save_state(state)
+            
+        pool = ocp["pool_address"]
+        lower_bin = ocp["lower_bin"]
+        upper_bin = ocp["upper_bin"]
+        fee_sol = ocp.get("fee_sol", 0.0)
+        deposit = pos_state.get("deposit_sol", 0.0)
+        
+        # Check active price and range status dynamically
         range_res = run_bridge(["check-range", pool])
+        active_bin = None
+        status_str = "⚠️ Menzil Bilgisi Alınamadı"
+        range_bar = ""
+        
         if range_res.get("success"):
             active_bin = range_res.get("active_bin")
-            upper_bin = pos.get("upper_bin")
-            lower_bin = pos.get("lower_bin")
-            
-            # Check range status
-            if active_bin is not None and upper_bin is not None and active_bin > upper_bin:
-                status_str = "🔴 Out-of-Range (Yukarı)"
-            elif active_bin is not None and lower_bin is not None and active_bin < lower_bin:
-                status_str = "🔴 Out-of-Range (Aşağı)"
-            else:
-                status_str = "🟢 In-Range (Aktif)"
+            if active_bin is not None:
+                if active_bin > upper_bin:
+                    status_str = "🔴 Out-of-Range (Yukarı)"
+                elif active_bin < lower_bin:
+                    status_str = "🔴 Out-of-Range (Aşağı)"
+                else:
+                    status_str = "🟢 In-Range (Aktif)"
+                range_bar = generate_range_bar(lower_bin, upper_bin, active_bin)
                 
-            active_price = range_res.get("active_price", 0.0)
-            price_details = f"Anlık Fiyat: {active_price:.6f} SOL/Lamport"
+        # Fetch latest Market Cap and format it
+        mcap = fetch_token_market_cap(config, addr)
+        mcap_str = format_mcap(mcap)
+        
+        if deposit <= 0.00001 or pos_state.get("reconstructed"):
+            deposit_sol_str = "Bilinmiyor (Reconstructed)"
         else:
-            status_str = "⚠️ Menzil Bilgisi Alınamadı"
-            price_details = "Meteora on-chain verisi çekilemedi."
-            active_bin = "N/A"
-            lower_bin = pos.get("lower_bin", "N/A")
-            upper_bin = pos.get("upper_bin", "N/A")
+            deposit_sol_str = f"{deposit:.5f} SOL"
             
         msg = (
             f"📈 <b>POZİSYON: {symbol}</b>\n"
             f"<code>{addr}</code>\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            f"<b>Yatırılan Tutar:</b> {deposit:.4f} SOL\n"
             f"<b>Menzil Durumu:</b> {status_str}\n"
-            f"<b>Alt Bin:</b> {lower_bin} | <b>Üst Bin:</b> {upper_bin}\n"
-            f"<b>Aktif Bin:</b> {active_bin}\n"
-            f"<b>Detay:</b> {price_details}\n"
+            f"{range_bar}"
+            f"<b>Alt Bin:</b> {lower_bin} | <b>Üst Bin:</b> {upper_bin}\n\n"
+            f"<b>Yatırılan Tutar:</b> {deposit_sol_str}\n"
+            f"<b>Piyasa Değeri (MCap):</b> {mcap_str}\n"
+            f"<b>Kazanılan Ücret (Fees):</b> <code>{fee_sol:.6f} SOL</code>\n"
             "━━━━━━━━━━━━━━━━━━"
         )
         
-        # Add Inline keyboard button to manually close the position
+        gmgn_url = f"https://gmgn.ai/sol/token/{addr}"
         inline_keyboard = {
             "inline_keyboard": [
-                [{"text": "🚨 Pozisyonu Kapat & SOL'e Çevir", "callback_data": f"close_{addr}"}]
+                [
+                    {"text": "📊 GMGN Grafik", "url": gmgn_url},
+                    {"text": "🚨 Pozisyonu Kapat", "callback_data": f"close_{addr}"}
+                ]
             ]
         }
         send_telegram(config, msg, reply_markup=inline_keyboard)
@@ -1234,15 +1447,44 @@ def handle_telegram_history(config, state):
     for pos in reversed(history[-5:]):
         symbol = pos.get("symbol", "UNKNOWN")
         deposit = pos.get("deposit_sol", 0.0)
+        pnl = pos.get("pnl", 0.0)
+        pnl_pct = pos.get("pnl_pct", 0.0)
         reason = pos.get("reason", "N/A")
         
-        # Human readable date
+        # Format Turkish exit reasons nicely
+        turkish_reasons = {
+            "upward_out_of_range": "Fiyat Yukarı Menzil Dışı (Rebalance)",
+            "manual_telegram_request": "Manuel Kapatma",
+            "manual_telegram_request_confirm": "Manuel Kapatma (Onaylı)",
+            "manual_clean_remaining": "Periyodik Cüzdan Temizliği"
+        }
+        display_reason = reason
+        if reason in turkish_reasons:
+            display_reason = turkish_reasons[reason]
+        elif reason.startswith("exit_signal:"):
+            display_reason = f"Teknik Çıkış Sinyali ({reason.split(':', 1)[1].strip()})"
+        elif reason.startswith("startup_audit_exit:"):
+            display_reason = f"Başlangıç Acil Çıkışı ({reason.split(':', 1)[1].strip()})"
+            
         closed_at_ts = pos.get("closed_at", 0)
         closed_at = time.strftime('%H:%M:%S', time.localtime(closed_at_ts)) if closed_at_ts else "N/A"
         
+        # PnL Sign and Emoji
+        if deposit <= 0.00001:
+            pnl_str = "Bilinmiyor (Reconstructed)"
+            deposit_str = "Bilinmiyor"
+        else:
+            pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+            pnl_sign = "+" if pnl >= 0 else ""
+            pnl_str = f"{pnl_emoji} {pnl_sign}{pnl:.4f} SOL ({pnl_sign}{pnl_pct:.2f}%)"
+            deposit_str = f"{deposit:.4f} SOL"
+            
         line = (
-            f"• <b>{symbol}</b> | Giriş: {deposit:.3f} SOL\n"
-            f"  Zaman: {closed_at} | Sebep: <code>{reason}</code>\n"
+            f"🪙 <b>{symbol}</b>\n"
+            f"  • <b>Giriş:</b> {deposit_str}\n"
+            f"  • <b>Kar/Zarar:</b> {pnl_str}\n"
+            f"  • <b>Zaman/Neden:</b> {closed_at} | <i>{display_reason}</i>\n"
+            f"━━━━━━━━━━━━━━━━━━"
         )
         msg_lines.append(line)
         
@@ -1873,22 +2115,10 @@ def reconstruct_state_from_chain(config, state):
         for ocp in on_chain_positions:
             token_address = ocp["token_address"]
             if token_address not in state.get("active_positions", {}):
-                # Fetch symbol from GMGN if not provided or UNKNOWN
+                # Fetch symbol dynamically using fetch_token_symbol
                 symbol = ocp.get("symbol")
                 if not symbol or symbol == "UNKNOWN":
-                    try:
-                        url_info = f"{HOST}/v1/token/info/sol/{token_address}"
-                        headers = {
-                            "X-APIKEY": config["gmgn_api_key"],
-                            "Content-Type": "application/json"
-                        }
-                        res_info = requests.get(url_info, params=build_auth_query(config), headers=headers, timeout=10)
-                        if res_info.status_code == 200:
-                            symbol = res_info.json().get("data", {}).get("symbol", "UNKNOWN").upper()
-                    except Exception as e:
-                        logging.warning(f"Could not fetch symbol from GMGN: {e}")
-                if not symbol:
-                    symbol = "UNKNOWN"
+                    symbol = fetch_token_symbol(config, token_address)
 
                 logging.info(f"🔄 Reconstructing missing state for active on-chain position: {symbol} ({token_address})")
                 
