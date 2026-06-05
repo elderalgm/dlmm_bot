@@ -165,6 +165,135 @@ def get_live_helius_credits():
     credits_info = state.get("credits_tracked", {})
     return credits_info.get("used", 0), credits_info.get("limit", 1000000)
 
+def execute_close_and_swap(config, state, token_address, reason):
+    positions = state.get("active_positions", {})
+    if token_address not in positions:
+        logging.error(f"execute_close_and_swap: Position for {token_address} not found in state.")
+        return {"success": False, "error": "Position not found"}
+        
+    pos = positions[token_address]
+    symbol = pos.get("symbol", "UNKNOWN")
+    pool = pos.get("pool_address", "UNKNOWN")
+    pos_addr = pos.get("position_address", "UNKNOWN")
+    deposit_sol = pos.get("deposit_sol", 0.0)
+    refundable_rent = pos.get("refundable_rent", 0.25)
+    initial_spent = deposit_sol + refundable_rent
+    
+    dry_run = is_dry_run(config, state)
+    
+    sol_before = 0.0
+    if not dry_run:
+        # Get balance before close
+        bal_before = run_bridge(["get-balance"])
+        if bal_before.get("success"):
+            sol_before = bal_before.get("balance", 0.0)
+            
+    # Execute close position on-chain
+    logging.info(f"Closing position on-chain for {symbol} ({token_address})...")
+    close_res = run_bridge(["close", pool, pos_addr])
+    
+    if close_res.get("success") or close_res.get("dry_run"):
+        token_x_amount = close_res.get("token_x_amount", 0.0)
+        token_x_mint = close_res.get("token_x_mint")
+        
+        swap_res = {"success": True, "tx": "N/A"}
+        swap_failed_warning = ""
+        
+        if not dry_run and token_x_amount > 0 and token_x_mint:
+            logging.info(f"Swapping {token_x_amount} {symbol} back to SOL...")
+            swap_res = run_bridge(["swap", token_x_mint, "SOL", f"{token_x_amount:.8f}"])
+            if not swap_res.get("success"):
+                swap_failed_warning = (
+                    "\n\n⚠️ <b>Swap işlemi başarısız oldu!</b> Tokenlar cüzdanda kaldı, "
+                    "10 dakika içindeki temizlik döngüsünde otomatik olarak SOL'e çevrilecektir."
+                )
+                
+        sol_after = 0.0
+        if not dry_run:
+            # Get balance after swap
+            bal_after = run_bridge(["get-balance"])
+            if bal_after.get("success"):
+                sol_after = bal_after.get("balance", 0.0)
+                
+        # Calculate PnL / Price changes
+        if dry_run:
+            retrieved_sol = initial_spent
+            pnl = 0.0
+            pnl_pct = 0.0
+            
+            # Simulated price change calculation
+            price_detail_str = ""
+            range_res = run_bridge(["check-range", pool])
+            if range_res.get("success"):
+                current_price = range_res.get("active_price", 0.0)
+                open_price = pos.get("open_price", 0.0)
+                if open_price > 0 and current_price > 0:
+                    price_change_pct = ((current_price - open_price) / open_price) * 100
+                    pnl_sign = "+" if price_change_pct >= 0 else ""
+                    price_detail_str = f"<b>Simüle Fiyat Değişimi:</b> {pnl_sign}{price_change_pct:.2f}%\n"
+            
+            pnl_str = f"Simülasyon Modu (Mali Hesaplama Devre Dışı)\n{price_detail_str}"
+        else:
+            retrieved_sol = sol_after - sol_before
+            pnl = retrieved_sol - initial_spent
+            pnl_pct = (pnl / initial_spent) * 100 if initial_spent > 0 else 0.0
+            
+            pnl_sign = "+" if pnl >= 0 else ""
+            pnl_pct_sign = "+" if pnl_pct >= 0 else ""
+            pnl_str = f"<code>{pnl_sign}{pnl:.5f} SOL ({pnl_pct_sign}{pnl_pct:.2f}%)</code>"
+            
+        # Update State
+        if token_address in state["active_positions"]:
+            del state["active_positions"][token_address]
+            
+        state["history"].append({
+            "token_address": token_address,
+            "symbol": symbol,
+            "pool_address": pool,
+            "position_address": pos_addr,
+            "deposit_sol": deposit_sol,
+            "refundable_rent": refundable_rent,
+            "retrieved_sol": retrieved_sol,
+            "pnl": pnl if not dry_run else 0.0,
+            "pnl_pct": pnl_pct if not dry_run else 0.0,
+            "closed_at": time.time(),
+            "reason": reason
+        })
+        save_state(state)
+        
+        # Human-readable Turkish notifications for exit reasons
+        turkish_reasons = {
+            "upward_out_of_range": "Fiyat Yukarı Menzil Dışı (Rebalance)",
+            "manual_telegram_request": "Manuel Telegram Kapatma Talebi"
+        }
+        display_reason = reason
+        if reason in turkish_reasons:
+            display_reason = turkish_reasons[reason]
+        elif reason.startswith("exit_signal:"):
+            display_reason = f"Teknik Çıkış Sinyali ({reason.split(':', 1)[1].strip()})"
+        elif reason.startswith("startup_audit_exit:"):
+            display_reason = f"Başlangıç Acil Tasfiyesi ({reason.split(':', 1)[1].strip()})"
+            
+        mode_str = "🧪 SIMULATION" if dry_run else "🟢 LIVE"
+        msg = (
+            f"🚨 <b>POZİSYON KAPATILDI ({mode_str}): {symbol}</b>\n"
+            f"<b>Sebep:</b> {display_reason}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Yatırılan Tutar:</b> {deposit_sol:.5f} SOL\n"
+            f"<b>Geri Alınabilir Kira:</b> {refundable_rent:.5f} SOL\n"
+            f"<b>Toplam Maliyet:</b> {initial_spent:.5f} SOL\n"
+            f"<b>Geri Alınan Toplam:</b> {retrieved_sol:.5f} SOL\n"
+            f"<b>Kar/Zarar:</b> {pnl_str}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Swap Tx:</b> <code>{swap_res.get('tx', 'N/A')}</code>"
+            f"{swap_failed_warning}"
+        )
+        send_telegram(config, msg)
+        return {"success": True}
+    else:
+        err = close_res.get("error", "Bilinmeyen Hata")
+        return {"success": False, "error": err}
+
 # Telegram Notification
 def send_telegram(config, text, reply_markup=None):
     token = config.get("telegram_token")
@@ -598,7 +727,8 @@ def check_tokens(config, state):
                     "upper_bin": open_res.get("upper_bin"),
                     "deposit_sol": deposit_sol,
                     "refundable_rent": open_res.get("refundable_rent"),
-                    "opened_at": time.time()
+                    "opened_at": time.time(),
+                    "open_price": range_check.get("active_price")
                 }
                 save_state(state)
                 
@@ -645,38 +775,8 @@ def monitor_positions(config, state):
                 logging.info(f"🔔 REBALANCE: Price went Upward Out-of-Range for {symbol} (active_bin {active_bin} > upper_bin {upper_bin}). Closing and rebalancing...")
                 
                 # Close Position
-                close_res = run_bridge(["close", pool_address, position_address])
+                close_res = execute_close_and_swap(config, state, token_address, "upward_out_of_range")
                 if close_res.get("success"):
-                    token_x_amount = close_res.get("token_x_amount", 0.0)
-                    token_x_mint = close_res.get("token_x_mint")
-                    
-                    # Swap token X back to SOL
-                    swap_res = {"success": True}
-                    if token_x_amount > 0:
-                        logging.info(f"Swapping {token_x_amount} {symbol} back to SOL...")
-                        swap_res = run_bridge(["swap", token_x_mint, "SOL", f"{token_x_amount:.8f}"])
-                        
-                    # Remove from active state
-                    del state["active_positions"][token_address]
-                    state["history"].append({
-                        "token_address": token_address,
-                        "symbol": symbol,
-                        "pool_address": pool_address,
-                        "position_address": position_address,
-                        "deposit_sol": pos["deposit_sol"],
-                        "closed_at": now,
-                        "reason": "upward_out_of_range"
-                    })
-                    save_state(state)
-                    
-                    msg = (
-                        f"🔄 <b>REBALANCE CLOSED: {symbol}</b>\n"
-                        f"Price went above position upper bin. Position closed and swapped back to SOL.\n\n"
-                        f"<b>Withdrawn Token Amount:</b> {token_x_amount:.4f} {symbol}\n"
-                        f"<b>Swap Tx:</b> <code>{swap_res.get('tx', 'N/A')}</code>"
-                    )
-                    send_telegram(config, msg)
-                    
                     # Try to re-open immediately with updated parameters
                     # By returning, the main loop will scan again and find it if criteria match
                     continue
@@ -692,38 +792,8 @@ def monitor_positions(config, state):
                 logging.info(f"🚨 EXIT SIGNAL for {symbol} ({token_address}). Triggers: {triggers}")
                 
                 # Close Position
-                close_res = run_bridge(["close", pool_address, position_address])
-                if close_res.get("success"):
-                    token_x_amount = close_res.get("token_x_amount", 0.0)
-                    token_x_mint = close_res.get("token_x_mint")
-                    
-                    # Swap token X back to SOL
-                    swap_res = {"success": True}
-                    if token_x_amount > 0:
-                        logging.info(f"Swapping {token_x_amount} {symbol} back to SOL...")
-                        swap_res = run_bridge(["swap", token_x_mint, "SOL", f"{token_x_amount:.8f}"])
-                        
-                    # Save to state history
-                    del state["active_positions"][token_address]
-                    state["history"].append({
-                        "token_address": token_address,
-                        "symbol": symbol,
-                        "pool_address": pool_address,
-                        "position_address": position_address,
-                        "deposit_sol": pos["deposit_sol"],
-                        "closed_at": now,
-                        "reason": f"exit_signal: {', '.join(triggers)}"
-                    })
-                    save_state(state)
-                    
-                    msg = (
-                        f"🚨 <b>EXIT SIGNAL TRIGGERED: {symbol}</b>\n"
-                        f"Position has been liquidated and swapped back to SOL.\n\n"
-                        f"<b>Triggers:</b> {', '.join(triggers)}\n"
-                        f"<b>Swap Tx:</b> <code>{swap_res.get('tx', 'N/A')}</code>"
-                    )
-                    send_telegram(config, msg)
-                else:
+                close_res = execute_close_and_swap(config, state, token_address, f"exit_signal: {', '.join(triggers)}")
+                if not close_res.get("success"):
                     logging.error(f"Failed to liquidate position: {close_res.get('error')}")
 
 # ─── Telegram Command Handler ─────────────────────────────────
@@ -1182,43 +1252,12 @@ def handle_telegram_close_position(config, state, token_address):
         
     pos = positions[token_address]
     symbol = pos.get("symbol", "UNKNOWN")
-    pool = pos.get("pool_address", "UNKNOWN")
-    pos_addr = pos.get("position_address", "UNKNOWN")
     
     send_telegram(config, f"⏳ <b>{symbol}</b> pozisyonu on-chain kapatılıyor ve swap işlemi başlatılıyor...")
     
     # Execute close position on-chain
-    close_res = run_bridge(["close", pool, pos_addr])
-    if close_res.get("success") or close_res.get("dry_run"):
-        token_x_amount = close_res.get("token_x_amount", 0.0)
-        token_x_mint = close_res.get("token_x_mint")
-        
-        swap_res = {"success": True, "tx": "N/A"}
-        if token_x_amount > 0 and token_x_mint:
-            # Swap token X back to SOL
-            swap_res = run_bridge(["swap", token_x_mint, "SOL", f"{token_x_amount:.8f}"])
-            
-        # Update state
-        del state["active_positions"][token_address]
-        state["history"].append({
-            "token_address": token_address,
-            "symbol": symbol,
-            "pool_address": pool,
-            "position_address": pos_addr,
-            "deposit_sol": pos.get("deposit_sol", 0.0),
-            "closed_at": time.time(),
-            "reason": "manual_telegram_request"
-        })
-        save_state(state)
-        
-        msg = (
-            f"🚨 <b>POZİSYON MANUEL KAPATILDI: {symbol}</b>\n"
-            f"Pozisyon başarıyla geri çekildi ve SOL swap işlemi tamamlandı.\n\n"
-            f"<b>Çekilen Tutar:</b> {token_x_amount:.4f} {symbol}\n"
-            f"<b>Swap Tx:</b> <code>{swap_res.get('tx', 'N/A')}</code>"
-        )
-        send_telegram(config, msg)
-    else:
+    close_res = execute_close_and_swap(config, state, token_address, "manual_telegram_request")
+    if not close_res.get("success"):
         error_msg = close_res.get("error", "Unknown error")
         send_telegram(config, f"❌ Hata: Pozisyon kapatılamadı: <code>{error_msg}</code>")
 # ─── Interactive Manual Buy Helpers ───────────────────────────
@@ -1310,6 +1349,7 @@ def process_range_selected(config, session, chat_id):
     session["refundable_rent"] = range_check.get("refundable_rent", 0.25)
     session["lower_bin"] = range_check.get("lower_bin")
     session["upper_bin"] = range_check.get("active_bin")
+    session["open_price"] = range_check.get("active_price")
     
     # Get balance
     bal_check = run_bridge(["get-balance"])
@@ -1411,7 +1451,8 @@ def execute_manual_buy(config, state, chat_id):
             "upper_bin": open_res.get("upper_bin") or session.get("upper_bin"),
             "deposit_sol": deposit_sol,
             "refundable_rent": open_res.get("refundable_rent", refundable_rent),
-            "opened_at": time.time()
+            "opened_at": time.time(),
+            "open_price": session.get("open_price")
         }
         save_state(state)
         
@@ -1791,7 +1832,8 @@ def handle_telegram_buy_token(config, state, token_address, deposit_amount_overr
             "upper_bin": open_res.get("upper_bin") or range_check.get("active_bin"),
             "deposit_sol": deposit_sol,
             "refundable_rent": open_res.get("refundable_rent", refundable_rent),
-            "opened_at": time.time()
+            "opened_at": time.time(),
+            "open_price": range_check.get("active_price")
         }
         save_state(state)
         
@@ -1843,38 +1885,8 @@ def startup_position_audit(config, state):
                 send_telegram(config, f"🚨 <b>Başlangıç Denetimi:</b> {symbol} için 5m çıkış sinyali tespit edildi! Acil tasfiye ediliyor...")
                 
                 # Close Position
-                close_res = run_bridge(["close", pool_address, position_address])
-                if close_res.get("success") or close_res.get("dry_run"):
-                    token_x_amount = close_res.get("token_x_amount", 0.0)
-                    token_x_mint = close_res.get("token_x_mint")
-                    
-                    # Swap token X back to SOL
-                    swap_res = {"success": True, "tx": "N/A"}
-                    if token_x_amount > 0 and token_x_mint:
-                        logging.info(f"Swapping {token_x_amount} {symbol} back to SOL...")
-                        swap_res = run_bridge(["swap", token_x_mint, "SOL", f"{token_x_amount:.8f}"])
-                        
-                    # Save to state history
-                    del state["active_positions"][token_address]
-                    state["history"].append({
-                        "token_address": token_address,
-                        "symbol": symbol,
-                        "pool_address": pool_address,
-                        "position_address": position_address,
-                        "deposit_sol": pos.get("deposit_sol", 0.0),
-                        "closed_at": now,
-                        "reason": f"startup_audit_exit: {', '.join(triggers)}"
-                    })
-                    save_state(state)
-                    
-                    msg = (
-                        f"🚨 <b>BAŞLANGIÇTA ACİL TASFİYE TAMAMLANDI: {symbol}</b>\n"
-                        f"Bot açılışında çıkış sinyali tespit edilerek pozisyon kapatıldı.\n\n"
-                        f"<b>Tetikleyiciler:</b> {', '.join(triggers)}\n"
-                        f"<b>Swap Tx:</b> <code>{swap_res.get('tx', 'N/A')}</code>"
-                    )
-                    send_telegram(config, msg)
-                else:
+                close_res = execute_close_and_swap(config, state, token_address, f"startup_audit_exit: {', '.join(triggers)}")
+                if not close_res.get("success"):
                     err = close_res.get("error", "Unknown error")
                     logging.error(f"Failed to liquidate {symbol} on startup: {err}")
                     send_telegram(config, f"❌ Hata: {symbol} başlangıçta kapatılamadı: <code>{err}</code>")
