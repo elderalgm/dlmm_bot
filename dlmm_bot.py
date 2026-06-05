@@ -83,8 +83,8 @@ def is_paused(state):
 def is_rpc_limit_exceeded(state):
     credits_info = state.get("credits_tracked", {})
     used = credits_info.get("used", 0)
-    # 900,000 credit limit (leaves a 100,000 buffer out of 1,000,000 free plan credits)
-    if used >= 900000:
+    limit = credits_info.get("limit", 1000000)
+    if used >= limit * 0.90:
         return True
     return False
 
@@ -145,6 +145,25 @@ def run_bridge(cmd_args):
     except Exception as e:
         logging.error(f"Failed to execute bridge: {e}")
         return {"success": False, "error": str(e)}
+
+def get_live_helius_credits():
+    try:
+        res = run_bridge(["get-helius-credits"])
+        if res.get("success"):
+            state = load_state()
+            state["credits_tracked"] = {
+                "month": time.strftime("%Y-%m"),
+                "used": res.get("used", 0),
+                "limit": res.get("limit", 1000000)
+            }
+            save_state(state)
+            return res.get("used", 0), res.get("limit", 1000000)
+    except Exception as e:
+        logging.error(f"Failed to fetch live Helius credits: {e}")
+        
+    state = load_state()
+    credits_info = state.get("credits_tracked", {})
+    return credits_info.get("used", 0), credits_info.get("limit", 1000000)
 
 # Telegram Notification
 def send_telegram(config, text, reply_markup=None):
@@ -1051,10 +1070,8 @@ def handle_telegram_status(config, state):
     status_str = "⏸ Durduruldu" if is_p else "▶️ Aktif (Çalışıyor)"
     
     # RPC Credits
-    credits_info = state.get("credits_tracked", {})
-    used_credits = credits_info.get("used", 0)
-    limit = 900000
-    credits_status = "🔴 Limit Aşımı" if used_credits >= limit else "🟢 Normal"
+    used_credits, limit = get_live_helius_credits()
+    credits_status = "🔴 Limit Aşımı" if used_credits >= limit * 0.90 else "🟢 Normal"
     
     msg = (
         "📊 <b>BOT DURUM RAPORU</b>\n"

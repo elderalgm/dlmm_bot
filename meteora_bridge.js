@@ -4,6 +4,7 @@ const { getBinArrayIndexesCoverage, getBinArrayKeysCoverage, getPositionRentExem
 const BN = require("bn.js");
 const bs58Import = require("bs58");
 const bs58 = bs58Import.default || bs58Import;
+const { ed25519 } = require("@noble/curves/ed25519");
 
 const fs = require("fs");
 const path = require("path");
@@ -370,6 +371,87 @@ async function cmdSwap(config, inputMint, outputMint, amountStr) {
   };
 }
 
+// ─── Command: get-helius-credits ──────────────────────────────
+async function cmdGetHeliusCredits(config) {
+  if (!config.wallet_private_key || config.wallet_private_key.startsWith("YOUR_")) {
+    throw new Error("Wallet private key not configured");
+  }
+  
+  const secretKey = bs58.decode(config.wallet_private_key);
+  const keypair = Keypair.fromSecretKey(secretKey);
+  const address = keypair.publicKey.toBase58();
+  
+  const timestamp = Date.now();
+  const messageObj = {
+    message: "Please sign this message to verify ownership of your wallet and connect to Helius.",
+    timestamp: timestamp
+  };
+  const messageStr = JSON.stringify(messageObj);
+  const messageBytes = new TextEncoder().encode(messageStr);
+  const signatureBytes = ed25519.sign(messageBytes, keypair.secretKey.slice(0, 32));
+  const signatureStr = bs58.encode(signatureBytes);
+  
+  const signupRes = await fetch("https://dev-api.helius.xyz/v0/wallet-signup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      message: messageStr,
+      signature: signatureStr,
+      userID: address
+    })
+  });
+  
+  if (!signupRes.ok) {
+    throw new Error(`Helius wallet-signup failed: ${await signupRes.text()}`);
+  }
+  
+  const signupData = await signupRes.json();
+  const jwt = signupData.token;
+  
+  const projectsRes = await fetch("https://dev-api.helius.xyz/v0/projects", {
+    method: "GET",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${jwt}`
+    }
+  });
+  
+  if (!projectsRes.ok) {
+    throw new Error(`Helius projects fetch failed: ${await projectsRes.text()}`);
+  }
+  
+  const projects = await projectsRes.json();
+  if (projects.length === 0) {
+    throw new Error("No projects found on this Helius account");
+  }
+  
+  const projectId = projects[0].id;
+  const projectRes = await fetch(`https://dev-api.helius.xyz/v0/projects/${projectId}`, {
+    method: "GET",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${jwt}`
+    }
+  });
+  
+  if (!projectRes.ok) {
+    throw new Error(`Helius project details fetch failed: ${await projectRes.text()}`);
+  }
+  
+  const details = await projectRes.json();
+  const usage = details.creditsUsage;
+  if (!usage) {
+    throw new Error("No usage details found in project response");
+  }
+  
+  return {
+    success: true,
+    used: usage.totalCreditsUsed,
+    remaining: usage.remainingCredits,
+    limit: usage.totalCreditsUsed + usage.remainingCredits
+  };
+}
+
 // ─── Entry Point ──────────────────────────────────────────────
 async function main() {
   const args = process.argv.slice(2);
@@ -401,6 +483,9 @@ async function main() {
     case "swap":
       if (args.length < 4) throw new Error("Missing arguments for swap: <input_mint> <output_mint> <amount>");
       result = await cmdSwap(config, args[1], args[2], args[3]);
+      break;
+    case "get-helius-credits":
+      result = await cmdGetHeliusCredits(config);
       break;
     default:
       throw new Error(`Unknown command: ${command}`);
