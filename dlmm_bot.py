@@ -675,7 +675,7 @@ def check_tokens(config, state):
                 
             # Condition 3: Has not generated any exit signal since the breakout
             has_exit_signal_since_breakout = False
-            for idx in range(breakout_idx, 0):
+            for idx in range(breakout_idx + 1, 0):
                 is_exit, _ = check_exit_signal(df, idx)
                 if is_exit:
                     has_exit_signal_since_breakout = True
@@ -907,7 +907,7 @@ def handle_telegram_candidates(config, state):
                             reason = "❌ ATH Kırılımı Yok"
                         else:
                             has_exit = False
-                            for idx in range(breakout_idx, 0):
+                            for idx in range(breakout_idx + 1, 0):
                                 is_exit, _ = check_exit_signal(df, idx)
                                 if is_exit:
                                     has_exit = True
