@@ -1905,6 +1905,7 @@ def main():
     last_token_scan = 0
     last_monitor_tick = 0
     last_telegram_tick = 0
+    last_token_cleanup = time.time() - 550 # Run first check 50 seconds after startup
     
     while True:
         now = time.time()
@@ -1934,6 +1935,32 @@ def main():
             except Exception as e:
                 logging.error(f"Error in position monitor loop: {e}")
             last_monitor_tick = time.time()
+            
+        # Check and swap remaining tokens in the wallet every 10 minutes (600 seconds)
+        if now - last_token_cleanup >= 600:
+            try:
+                config = load_config()
+                res = run_bridge(["swap-remaining-tokens"])
+                if res.get("success") and res.get("swaps"):
+                    swaps = res["swaps"]
+                    for sw in swaps:
+                        mint = sw.get("mint")
+                        amount = sw.get("amount")
+                        tx = sw.get("tx", "N/A")
+                        dry = sw.get("dry_run", False)
+                        
+                        mode_str = "🧪 SIMULATION" if dry else "🟢 LIVE"
+                        msg = (
+                            f"♻️ <b>WALLET CLEANUP ({mode_str}):</b>\n"
+                            f"Cüzdanda kalan token tespit edildi ve SOL'e dönüştürüldü.\n\n"
+                            f"• <b>Token Mint:</b> <code>{mint}</code>\n"
+                            f"• <b>Miktar:</b> {amount}\n"
+                            f"• <b>Swap Tx:</b> <code>{tx}</code>"
+                        )
+                        send_telegram(config, msg)
+            except Exception as e:
+                logging.error(f"Error in token cleanup loop: {e}")
+            last_token_cleanup = time.time()
             
         time.sleep(5)
 

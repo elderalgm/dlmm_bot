@@ -452,6 +452,99 @@ async function cmdGetHeliusCredits(config) {
   };
 }
 
+// ─── Command: swap-remaining-tokens ───────────────────────────
+async function cmdSwapRemainingTokens(config) {
+  const connection = getSolanaConnection(config);
+  const wallet = getWalletKeypair(config);
+  
+  const tokenProgramId = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+  const token2022ProgramId = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCX8a56kk");
+  
+  const accounts = [];
+  try {
+    const res1 = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, { programId: tokenProgramId }, "confirmed");
+    accounts.push(...res1.value);
+  } catch (e) {
+    console.error("Failed to fetch Token accounts:", e.message);
+  }
+  
+  try {
+    const res2 = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, { programId: token2022ProgramId }, "confirmed");
+    accounts.push(...res2.value);
+  } catch (e) {
+    console.error("Failed to fetch Token-2022 accounts:", e.message);
+  }
+  
+  const swaps = [];
+  const WSOL_MINT = "So11111111111111111111111111111111111111112";
+  
+  for (const account of accounts) {
+    const info = account.account.data.parsed.info;
+    const mint = info.mint;
+    const amount = info.tokenAmount.uiAmount;
+    const decimals = info.tokenAmount.decimals;
+    const rawAmount = info.tokenAmount.amount;
+    
+    if (amount <= 0) continue;
+    if (mint === WSOL_MINT) continue; // Skip WSOL
+    
+    try {
+      if (config.dry_run) {
+        swaps.push({ mint, amount, dry_run: true, message: "Dry run: would swap to SOL" });
+        continue;
+      }
+      
+      const searchParams = new URLSearchParams({
+        inputMint: mint,
+        outputMint: "SOL",
+        amount: rawAmount,
+        taker: wallet.publicKey.toString()
+      });
+      
+      const JUPITER_API_URL = `https://api.jup.ag/swap/v2/order?${searchParams.toString()}`;
+      const res = await fetch(JUPITER_API_URL);
+      if (!res.ok) {
+        console.error(`Token ${mint} swap quote failed: ${res.status}`);
+        continue;
+      }
+      
+      const order = await res.json();
+      if (order.errorCode || order.errorMessage) {
+        console.error(`Token ${mint} Jupiter error: ${order.errorMessage || order.errorCode}`);
+        continue;
+      }
+      
+      const { transaction: unsignedTx, requestId } = order;
+      const tx = VersionedTransaction.deserialize(Buffer.from(unsignedTx, "base64"));
+      tx.sign([wallet]);
+      const signedTx = Buffer.from(tx.serialize()).toString("base64");
+      
+      const execRes = await fetch("https://api.jup.ag/swap/v2/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ signedTransaction: signedTx, requestId })
+      });
+      
+      if (!execRes.ok) {
+        console.error(`Token ${mint} swap execution failed: ${execRes.status}`);
+        continue;
+      }
+      
+      const result = await execRes.json();
+      if (result.status === "Failed") {
+        console.error(`Token ${mint} transaction failed on-chain`);
+        continue;
+      }
+      
+      swaps.push({ mint, amount, success: true, tx: result.signature });
+    } catch (err) {
+      console.error(`Error swapping ${mint}:`, err.message);
+    }
+  }
+  
+  return { success: true, swaps };
+}
+
 // ─── Entry Point ──────────────────────────────────────────────
 async function main() {
   const args = process.argv.slice(2);
@@ -486,6 +579,9 @@ async function main() {
       break;
     case "get-helius-credits":
       result = await cmdGetHeliusCredits(config);
+      break;
+    case "swap-remaining-tokens":
+      result = await cmdSwapRemainingTokens(config);
       break;
     default:
       throw new Error(`Unknown command: ${command}`);
