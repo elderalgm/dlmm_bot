@@ -817,7 +817,7 @@ def check_tokens(config, state):
                 c = df.iloc[pos_idx]
                 prev_max = df.iloc[:pos_idx]['high'].max()
                 avg_volume = df.iloc[max(0, pos_idx - 10):pos_idx]['volume'].mean()
-                if c['close'] > prev_max and c['volume'] > avg_volume * 1.5:
+                if c['close'] > prev_max and c['volume'] > avg_volume * 1.1:
                     breakout_idx = neg_idx
                     break
                     
@@ -825,9 +825,9 @@ def check_tokens(config, state):
                 # No high-volume ATH breakout found recently
                 continue
                 
-            # Condition 3: Has not generated any exit signal since the breakout
+            # Condition 3: Has not generated any exit signal since the breakout (only check closed candles)
             has_exit_signal_since_breakout = False
-            for idx in range(breakout_idx + 1, 0):
+            for idx in range(breakout_idx + 1, -1):
                 is_exit, _ = check_exit_signal(df, idx)
                 if is_exit:
                     has_exit_signal_since_breakout = True
@@ -935,18 +935,26 @@ def monitor_positions(config, state):
                 else:
                     logging.error(f"Failed to close position for rebalance: {close_res.get('error')}")
         
-        # 2. Check for Exit Signal on 5m candles
+        # 2. Check for Exit Signal on 5m candles (Only check on closed candles, i.e. index=-2)
         klines = get_kline_data(config, token_address)
         df = calculate_indicators(klines)
-        if df is not None:
-            is_exit, triggers = check_exit_signal(df)
-            if is_exit:
-                logging.info(f"🚨 EXIT SIGNAL for {symbol} ({token_address}). Triggers: {triggers}")
-                
-                # Close Position
-                close_res = execute_close_and_swap(config, state, token_address, f"exit_signal: {', '.join(triggers)}")
-                if not close_res.get("success"):
-                    logging.error(f"Failed to liquidate position: {close_res.get('error')}")
+        if df is not None and len(df) >= 2:
+            last_closed_candle = df.iloc[-2]
+            candle_close_time = int(last_closed_candle.get("time", 0)) + 300
+            opened_at = pos.get("opened_at", 0)
+            
+            # Ensure the candle closed after the position was opened to avoid immediate trigger
+            if candle_close_time > opened_at:
+                is_exit, triggers = check_exit_signal(df, index=-2)
+                if is_exit:
+                    logging.info(f"🚨 EXIT SIGNAL for {symbol} ({token_address}) on candle closing at {time.strftime('%H:%M:%S', time.localtime(candle_close_time))}. Triggers: {triggers}")
+                    
+                    # Close Position
+                    close_res = execute_close_and_swap(config, state, token_address, f"exit_signal: {', '.join(triggers)}")
+                    if not close_res.get("success"):
+                        logging.error(f"Failed to liquidate position: {close_res.get('error')}")
+            else:
+                logging.info(f"Skipping exit check for {symbol} on candle closing at {time.strftime('%H:%M:%S', time.localtime(candle_close_time))} (opened at {time.strftime('%H:%M:%S', time.localtime(opened_at))})")
 
 # ─── Telegram Command Handler ─────────────────────────────────
 TELEGRAM_UPDATE_OFFSET = 0
@@ -1052,14 +1060,14 @@ def handle_telegram_candidates(config, state):
                             c = df.iloc[pos_idx]
                             prev_max = df.iloc[:pos_idx]['high'].max()
                             avg_volume = df.iloc[max(0, pos_idx - 10):pos_idx]['volume'].mean()
-                            if c['close'] > prev_max and c['volume'] > avg_volume * 1.5:
+                            if c['close'] > prev_max and c['volume'] > avg_volume * 1.1:
                                 breakout_idx = neg_idx
                                 break
                         if breakout_idx is None:
                             reason = "❌ ATH Kırılımı Yok"
                         else:
                             has_exit = False
-                            for idx in range(breakout_idx + 1, 0):
+                            for idx in range(breakout_idx + 1, -1):
                                 is_exit, _ = check_exit_signal(df, idx)
                                 if is_exit:
                                     has_exit = True
@@ -2200,10 +2208,10 @@ def startup_position_audit(config, state):
         klines = get_kline_data(config, token_address)
         df = calculate_indicators(klines)
         
-        if df is not None:
-            is_exit, triggers = check_exit_signal(df)
+        if df is not None and len(df) >= 2:
+            is_exit, triggers = check_exit_signal(df, index=-2)
             if is_exit:
-                logging.info(f"🚨 Startup Audit: EXIT SIGNAL found on startup for {symbol}! Triggers: {triggers}. Liquidating immediately...")
+                logging.info(f"🚨 Startup Audit: EXIT SIGNAL found on startup for {symbol} on last closed candle! Triggers: {triggers}. Liquidating immediately...")
                 send_telegram(config, f"🚨 <b>Başlangıç Denetimi:</b> {symbol} için 5m çıkış sinyali tespit edildi! Acil tasfiye ediliyor...")
                 
                 # Close Position
