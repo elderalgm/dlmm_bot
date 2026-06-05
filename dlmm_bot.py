@@ -529,15 +529,15 @@ def check_tokens(config, state):
                 continue
                 
             # Condition 2: Historical breakout & dump allowance
-            # Find when the breakout occurred in last 50 candles
+            # Find the most recent breakout in last 50 candles (searching newest to oldest)
             breakout_idx = None
-            # Find index where close broke past previous ATH
-            # (Simplification: look for a candle that broke the high of previous candles)
-            for idx in range(-min(50, len(df)), -1):
-                c = df.iloc[idx]
-                prev_max = df.iloc[:idx]['high'].max()
-                if c['close'] > prev_max and c['volume'] > df.iloc[idx-10:idx]['volume'].mean() * 1.5:
-                    breakout_idx = idx
+            for neg_idx in range(-1, -min(50, len(df)) - 1, -1):
+                pos_idx = len(df) + neg_idx
+                c = df.iloc[pos_idx]
+                prev_max = df.iloc[:pos_idx]['high'].max()
+                avg_volume = df.iloc[max(0, pos_idx - 10):pos_idx]['volume'].mean()
+                if c['close'] > prev_max and c['volume'] > avg_volume * 1.5:
+                    breakout_idx = neg_idx
                     break
                     
             if breakout_idx is None:
@@ -823,12 +823,15 @@ def handle_telegram_candidates(config, state):
                     if last_candle.get("ST_dir", -1) != 1:
                         reason = "❌ Supertrend Kırmızı"
                     else:
+                        # Find the most recent breakout in last 50 candles (searching newest to oldest)
                         breakout_idx = None
-                        for idx in range(-min(50, len(df)), -1):
-                            c = df.iloc[idx]
-                            prev_max = df.iloc[:idx]['high'].max()
-                            if c['close'] > prev_max and c['volume'] > df.iloc[idx-10:idx]['volume'].mean() * 1.5:
-                                breakout_idx = idx
+                        for neg_idx in range(-1, -min(50, len(df)) - 1, -1):
+                            pos_idx = len(df) + neg_idx
+                            c = df.iloc[pos_idx]
+                            prev_max = df.iloc[:pos_idx]['high'].max()
+                            avg_volume = df.iloc[max(0, pos_idx - 10):pos_idx]['volume'].mean()
+                            if c['close'] > prev_max and c['volume'] > avg_volume * 1.5:
+                                breakout_idx = neg_idx
                                 break
                         if breakout_idx is None:
                             reason = "❌ ATH Kırılımı Yok"
