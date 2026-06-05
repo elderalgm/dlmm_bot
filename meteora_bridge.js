@@ -457,20 +457,32 @@ async function cmdGetActivePositions(config) {
   const connection = getSolanaConnection(config);
   const wallet = getWalletKeypair(config);
   
-  const positionsMap = await DLMM.getAllLbPairPositionsByUser(connection, wallet.publicKey);
-  const result = [];
+  // We initialize the program by creating a DLMM instance for a dummy pool
+  const dummyPoolPubKey = new PublicKey("BRHNunv6MzznkDQAev7aEBmQANudm7NC44MuLVz6FMf6");
+  const dummyPool = await DLMM.create(connection, dummyPoolPubKey);
+  const program = dummyPool.program;
   
-  for (const [poolAddress, positionInfo] of positionsMap.entries()) {
+  const positions = await program.account.positionV2.all([
+    {
+      memcmp: {
+        offset: 40, // 8 discriminator + 32 lbPair = 40
+        bytes: wallet.publicKey.toBase58()
+      }
+    }
+  ]);
+  
+  const result = [];
+  for (const pos of positions) {
     try {
-      const positionPubKey = positionInfo.publicKey;
-      const poolPubKey = positionInfo.positionData.lbPair;
+      const positionPubKey = pos.publicKey;
+      const poolPubKey = pos.account.lbPair;
       
       const pool = await DLMM.create(connection, poolPubKey);
       const tokenAddress = pool.lbPair.tokenXMint.toBase58();
       const symbol = pool.tokenX.symbol;
       
-      const lowerBin = positionInfo.positionData.lowerBinId;
-      const upperBin = positionInfo.positionData.upperBinId;
+      const lowerBin = pos.account.lowerBinId;
+      const upperBin = pos.account.upperBinId;
       const totalBins = upperBin - lowerBin;
       const rentLamports = await getPositionRentExemption(connection, new BN(totalBins));
       const refundableRent = Number(rentLamports) / 1e9;
@@ -485,12 +497,13 @@ async function cmdGetActivePositions(config) {
         refundable_rent: refundableRent
       });
     } catch (e) {
-      console.error(`Error parsing position:`, e.message);
+      console.error(`Error parsing position ${pos.publicKey.toBase58()}:`, e.message);
     }
   }
   
   return { success: true, positions: result };
 }
+
 
 // ─── Command: swap-remaining-tokens ───────────────────────────
 async function cmdSwapRemainingTokens(config) {
