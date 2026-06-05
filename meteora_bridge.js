@@ -479,7 +479,7 @@ async function cmdGetActivePositions(config) {
       
       const pool = await DLMM.create(connection, poolPubKey);
       const tokenAddress = pool.lbPair.tokenXMint.toBase58();
-      const symbol = pool.tokenX.symbol;
+      const symbol = (pool.tokenX && pool.tokenX.symbol) ? pool.tokenX.symbol : "UNKNOWN";
       
       const lowerBin = pos.account.lowerBinId;
       const upperBin = pos.account.upperBinId;

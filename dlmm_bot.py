@@ -1873,7 +1873,24 @@ def reconstruct_state_from_chain(config, state):
         for ocp in on_chain_positions:
             token_address = ocp["token_address"]
             if token_address not in state.get("active_positions", {}):
-                logging.info(f"🔄 Reconstructing missing state for active on-chain position: {ocp['symbol']} ({token_address})")
+                # Fetch symbol from GMGN if not provided or UNKNOWN
+                symbol = ocp.get("symbol")
+                if not symbol or symbol == "UNKNOWN":
+                    try:
+                        url_info = f"{HOST}/v1/token/info/sol/{token_address}"
+                        headers = {
+                            "X-APIKEY": config["gmgn_api_key"],
+                            "Content-Type": "application/json"
+                        }
+                        res_info = requests.get(url_info, params=build_auth_query(config), headers=headers, timeout=10)
+                        if res_info.status_code == 200:
+                            symbol = res_info.json().get("data", {}).get("symbol", "UNKNOWN").upper()
+                    except Exception as e:
+                        logging.warning(f"Could not fetch symbol from GMGN: {e}")
+                if not symbol:
+                    symbol = "UNKNOWN"
+
+                logging.info(f"🔄 Reconstructing missing state for active on-chain position: {symbol} ({token_address})")
                 
                 # Fetch current price from check-range as fallback for open_price
                 open_price = 0.0
@@ -1882,7 +1899,7 @@ def reconstruct_state_from_chain(config, state):
                     open_price = range_check.get("active_price", 0.0)
                     
                 state["active_positions"][token_address] = {
-                    "symbol": ocp["symbol"],
+                    "symbol": symbol,
                     "pool_address": ocp["pool_address"],
                     "position_address": ocp["position_address"],
                     "lower_bin": ocp["lower_bin"],
@@ -1896,7 +1913,7 @@ def reconstruct_state_from_chain(config, state):
                 state_updated = True
                 
                 msg = (
-                    f"🔄 <b>ON-CHAIN POZİSYON KURTARILDI: {ocp['symbol']}</b>\n"
+                    f"🔄 <b>ON-CHAIN POZİSYON KURTARILDI: {symbol}</b>\n"
                     f"Yerel durum verisi kaybolmuştu. Pozisyon zincir üzerinden otomatik olarak algılandı ve izleme listesine eklendi.\n\n"
                     f"• <b>Menzil Bins:</b> {ocp['lower_bin']} - {ocp['upper_bin']}\n"
                     f"• <b>Havuz:</b> <code>{ocp['pool_address']}</code>\n"
