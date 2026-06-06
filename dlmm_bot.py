@@ -88,6 +88,28 @@ def is_rpc_limit_exceeded(state):
         return True
     return False
 
+def safe_float(d, key, default=0.0):
+    if not isinstance(d, dict):
+        return default
+    val = d.get(key)
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+def safe_int(d, key, default=0):
+    if not isinstance(d, dict):
+        return default
+    val = d.get(key)
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
 # Bridge Invoker
 def run_bridge(cmd_args):
     # Track Helius RPC credit usage
@@ -596,7 +618,7 @@ def calculate_indicators(klines):
 def check_exit_signal(df, index=-1):
     """ Returns True if at least 2 out of 4 exit indicators trigger """
     if df is None or len(df) < index * -1:
-        return False
+        return False, []
     
     last = df.iloc[index]
     prev = df.iloc[index - 1]
@@ -755,44 +777,44 @@ def check_tokens(config, state):
                 continue
                 
             # Apply Safety Filters
-            renounced_mint = t.get("renounced_mint", 0)
-            renounced_freeze = t.get("renounced_freeze_account", 0)
+            renounced_mint = safe_int(t, "renounced_mint", 0)
+            renounced_freeze = safe_int(t, "renounced_freeze_account", 0)
             if renounced_mint != 1 or renounced_freeze != 1:
                 continue
                 
-            creation_timestamp = t.get("creation_timestamp", now)
+            creation_timestamp = safe_float(t, "creation_timestamp", now)
             if now - creation_timestamp < 2 * 3600: # 2 hours
                 continue
                 
-            market_cap = t.get("market_cap", 0)
+            market_cap = safe_float(t, "market_cap", 0.0)
             if market_cap < 250_000:
                 continue
                 
-            volume = t.get("volume", 0)
+            volume = safe_float(t, "volume", 0.0)
             if volume < 1_000_000:
                 continue
                 
-            gas_fee = t.get("gas_fee", 0)
+            gas_fee = safe_float(t, "gas_fee", 0.0)
             if gas_fee < 30:
                 continue
                 
-            holder_count = t.get("holder_count", 0)
+            holder_count = safe_int(t, "holder_count", 0)
             if holder_count < 900:
                 continue
                 
-            if t.get("top_10_holder_rate", 1.0) > 0.30:
+            if safe_float(t, "top_10_holder_rate", 1.0) > 0.30:
                 continue
-            if t.get("dev_team_hold_rate", 1.0) > 0.05:
+            if safe_float(t, "dev_team_hold_rate", 1.0) > 0.05:
                 continue
-            if t.get("bundler_rate", 1.0) > 0.68:
+            if safe_float(t, "bundler_rate", 1.0) > 0.68:
                 continue
-            if t.get("entrapment_ratio", 1.0) > 0.30:
+            if safe_float(t, "entrapment_ratio", 1.0) > 0.30:
                 continue
-            if t.get("rug_ratio", 1.0) > 0.50:
+            if safe_float(t, "rug_ratio", 1.0) > 0.50:
                 continue
                 
-            ath_mcap = t.get("history_highest_market_cap", 0)
-            if ath_mcap == 0:
+            ath_mcap = safe_float(t, "history_highest_market_cap", 0.0)
+            if ath_mcap == 0.0:
                 continue
                 
             # ATH proximity check: MC >= 80% of ATH
@@ -1004,43 +1026,43 @@ def handle_telegram_candidates(config, state):
                 continue
                 
             # Apply Safety Filters
-            renounced_mint = t.get("renounced_mint", 0)
-            renounced_freeze = t.get("renounced_freeze_account", 0)
+            renounced_mint = safe_int(t, "renounced_mint", 0)
+            renounced_freeze = safe_int(t, "renounced_freeze_account", 0)
             if renounced_mint != 1 or renounced_freeze != 1:
                 continue
                 
-            creation_timestamp = t.get("creation_timestamp", now)
+            creation_timestamp = safe_float(t, "creation_timestamp", now)
             if now - creation_timestamp < 2 * 3600: # 2 hours
                 continue
                 
-            market_cap = t.get("market_cap", 0)
+            market_cap = safe_float(t, "market_cap", 0.0)
             if market_cap < 250_000:
                 continue
                 
-            volume = t.get("volume", 0)
+            volume = safe_float(t, "volume", 0.0)
             if volume < 1_000_000:
                 continue
                 
-            gas_fee = t.get("gas_fee", 0)
+            gas_fee = safe_float(t, "gas_fee", 0.0)
             if gas_fee < 30:
                 continue
                 
-            holder_count = t.get("holder_count", 0)
+            holder_count = safe_int(t, "holder_count", 0)
             if holder_count < 900:
                 continue
                 
-            if t.get("top_10_holder_rate", 1.0) > 0.30:
+            if safe_float(t, "top_10_holder_rate", 1.0) > 0.30:
                 continue
-            if t.get("dev_team_hold_rate", 1.0) > 0.05:
+            if safe_float(t, "dev_team_hold_rate", 1.0) > 0.05:
                 continue
-            if t.get("bundler_rate", 1.0) > 0.68:
+            if safe_float(t, "bundler_rate", 1.0) > 0.68:
                 continue
-            if t.get("entrapment_ratio", 1.0) > 0.30:
+            if safe_float(t, "entrapment_ratio", 1.0) > 0.30:
                 continue
-            if t.get("rug_ratio", 1.0) > 0.50:
+            if safe_float(t, "rug_ratio", 1.0) > 0.50:
                 continue
                 
-            ath_mcap = t.get("history_highest_market_cap", 0)
+            ath_mcap = safe_float(t, "history_highest_market_cap", 0.0)
             
             # If it passes safety, it's a candidate! Let's check indicators
             reason = ""
