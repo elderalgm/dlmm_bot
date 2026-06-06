@@ -866,7 +866,7 @@ def check_tokens(config, state):
             
             deposit_sol = wallet_sol - refundable_rent - gas_reserve
             if deposit_sol < 0.01:
-                logging.warning(f"Aborting open: insufficient balance. Sol: {wallet_sol}, Rent: {refundableRent}, Reserve: {gas_reserve}")
+                logging.warning(f"Aborting open: insufficient balance. Sol: {wallet_sol}, Rent: {refundable_rent}, Reserve: {gas_reserve}")
                 continue
                 
             logging.info(f"🔔 OPEN SIGNAL for {symbol} ({address}) in pool {pool_address}. Deposit Amount: {deposit_sol:.4f} SOL")

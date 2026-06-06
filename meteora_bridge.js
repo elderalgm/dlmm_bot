@@ -27,7 +27,8 @@ function readConfig() {
     gas_reserve: parseFloat(process.env.GAS_RESERVE || config.gas_reserve || 0.05),
     min_tvl: parseFloat(process.env.MIN_TVL || config.min_tvl || 15000),
     min_bin_step: parseInt(process.env.MIN_BIN_STEP || config.min_bin_step || 80),
-    min_base_fee_pct: parseFloat(process.env.MIN_BASE_FEE_PCT || config.min_base_fee_pct || 2.0)
+    min_base_fee_pct: parseFloat(process.env.MIN_BASE_FEE_PCT || config.min_base_fee_pct || 2.0),
+    jupiter_api_key: process.env.JUPITER_API_KEY || config.jupiter_api_key || ""
   };
 }
 
@@ -356,7 +357,11 @@ async function cmdSwap(config, inputMint, outputMint, amountStr) {
   });
   
   const JUPITER_API_URL = `https://api.jup.ag/swap/v2/order?${searchParams.toString()}`;
-  const res = await fetch(JUPITER_API_URL);
+  const orderHeaders = {};
+  if (config.jupiter_api_key) {
+    orderHeaders["x-api-key"] = config.jupiter_api_key;
+  }
+  const res = await fetch(JUPITER_API_URL, { headers: orderHeaders });
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Jupiter Order API failed: ${res.status} - ${body}`);
@@ -375,9 +380,13 @@ async function cmdSwap(config, inputMint, outputMint, amountStr) {
   const signedTx = Buffer.from(tx.serialize()).toString("base64");
   
   // Execute transaction
+  const execHeaders = { "Content-Type": "application/json" };
+  if (config.jupiter_api_key) {
+    execHeaders["x-api-key"] = config.jupiter_api_key;
+  }
   const execRes = await fetch("https://api.jup.ag/swap/v2/execute", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: execHeaders,
     body: JSON.stringify({ signedTransaction: signedTx, requestId })
   });
   if (!execRes.ok) {
@@ -602,7 +611,11 @@ async function cmdSwapRemainingTokens(config) {
       });
       
       const JUPITER_API_URL = `https://api.jup.ag/swap/v2/order?${searchParams.toString()}`;
-      const res = await fetch(JUPITER_API_URL);
+      const orderHeaders = {};
+      if (config.jupiter_api_key) {
+        orderHeaders["x-api-key"] = config.jupiter_api_key;
+      }
+      const res = await fetch(JUPITER_API_URL, { headers: orderHeaders });
       if (!res.ok) {
         console.error(`Token ${mint} swap quote failed: ${res.status}`);
         continue;
@@ -619,9 +632,13 @@ async function cmdSwapRemainingTokens(config) {
       tx.sign([wallet]);
       const signedTx = Buffer.from(tx.serialize()).toString("base64");
       
+      const execHeaders = { "Content-Type": "application/json" };
+      if (config.jupiter_api_key) {
+        execHeaders["x-api-key"] = config.jupiter_api_key;
+      }
       const execRes = await fetch("https://api.jup.ag/swap/v2/execute", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: execHeaders,
         body: JSON.stringify({ signedTransaction: signedTx, requestId })
       });
       
