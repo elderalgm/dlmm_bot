@@ -9,5 +9,6 @@
   "min_tvl": 15000,
   "min_bin_step": 80,
   "min_base_fee_pct": 2.0,
-  "jupiter_api_key": "jup_73f07fdfb62a2313d6afa8e0e5dac69802f6259ed350658a7bad6d2b4ca21af1"
+  "jupiter_api_key": "jup_73f07fdfb62a2313d6afa8e0e5dac69802f6259ed350658a7bad6d2b4ca21af1",
+  "priority_fee_micro_lamports": 100000
 }

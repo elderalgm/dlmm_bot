@@ -28,7 +28,8 @@ function readConfig() {
     min_tvl: parseFloat(process.env.MIN_TVL || config.min_tvl || 15000),
     min_bin_step: parseInt(process.env.MIN_BIN_STEP || config.min_bin_step || 80),
     min_base_fee_pct: parseFloat(process.env.MIN_BASE_FEE_PCT || config.min_base_fee_pct || 2.0),
-    jupiter_api_key: process.env.JUPITER_API_KEY || config.jupiter_api_key || ""
+    jupiter_api_key: process.env.JUPITER_API_KEY || config.jupiter_api_key || "",
+    priority_fee_micro_lamports: parseInt(process.env.PRIORITY_FEE_MICRO_LAMPORTS || config.priority_fee_micro_lamports || 100000)
   };
 }
 
@@ -54,11 +55,12 @@ async function sendAndConfirmTransactionWithFees(connection, tx, signers) {
     }
     
     if (!hasComputeBudget) {
+      const config = readConfig();
       const limitInst = ComputeBudgetProgram.setComputeUnitLimit({
         units: 800000
       });
       const priceInst = ComputeBudgetProgram.setComputeUnitPrice({
-        microLamports: 1500000
+        microLamports: config.priority_fee_micro_lamports
       });
       tx.instructions.unshift(limitInst, priceInst);
     }
