@@ -55,21 +55,70 @@ def load_config():
     return merged
 
 # Load / Save State
-def load_state():
-    if not os.path.exists(STATE_PATH):
-        return {"active_positions": {}, "history": []}
+def get_kv_url():
     try:
-        with open(STATE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+        config = load_config()
+        token = config.get("telegram_token", "")
+        if not token or token.startswith("YOUR_"):
+            return None
+        import hashlib
+        bucket = hashlib.sha256(token.encode()).hexdigest()[:16]
+        return f"https://kvdb.io/{bucket}/state"
     except Exception:
-        return {"active_positions": {}, "history": []}
+        return None
 
-def save_state(state):
+def load_state():
+    local_state = {"active_positions": {}, "history": []}
+    if os.path.exists(STATE_PATH):
+        try:
+            with open(STATE_PATH, "r", encoding="utf-8") as f:
+                local_state = json.load(f)
+        except Exception:
+            pass
+            
+    # Try to restore from remote backup if local state is empty
+    if not local_state.get("active_positions") and not local_state.get("history"):
+        url = get_kv_url()
+        if url:
+            try:
+                logging.info(f"Attempting to restore state from remote backup: {url}")
+                res = requests.get(url, timeout=5)
+                if res.status_code == 200:
+                    remote_state = res.json()
+                    if isinstance(remote_state, dict) and ("active_positions" in remote_state or "history" in remote_state):
+                        logging.info("State successfully restored from remote backup!")
+                        # Save locally
+                        try:
+                            with open(STATE_PATH, "w", encoding="utf-8") as f:
+                                json.dump(remote_state, f, indent=2)
+                        except Exception:
+                            pass
+                        return remote_state
+            except Exception as e:
+                logging.warning(f"Failed to restore state from remote backup: {e}")
+                
+    return local_state
+
+def save_state(state, backup=True):
     try:
         with open(STATE_PATH, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
     except Exception as e:
         logging.error(f"Failed to save state: {e}")
+        
+    if backup:
+        url = get_kv_url()
+        if url:
+            try:
+                import threading
+                def do_backup():
+                    try:
+                        requests.post(url, json=state, timeout=5)
+                    except Exception:
+                        pass
+                threading.Thread(target=do_backup, daemon=True).start()
+            except Exception as e:
+                logging.warning(f"Failed to start remote backup thread: {e}")
 
 def is_dry_run(config, state):
     override = state.get("dry_run_override")
@@ -813,6 +862,15 @@ def check_tokens(config, state):
             if safe_float(t, "rug_ratio", 1.0) > 0.50:
                 continue
                 
+            # Honeypot & Tax Filters
+            is_honeypot = safe_int(t, "is_honeypot", 0)
+            if is_honeypot != 0:
+                continue
+            buy_tax = safe_float(t, "buy_tax", 0.0)
+            sell_tax = safe_float(t, "sell_tax", 0.0)
+            if buy_tax > 0.0 or sell_tax > 0.0:
+                continue
+                
             ath_mcap = safe_float(t, "history_highest_market_cap", 0.0)
             if ath_mcap == 0.0:
                 continue
@@ -1060,6 +1118,15 @@ def handle_telegram_candidates(config, state):
             if safe_float(t, "entrapment_ratio", 1.0) > 0.30:
                 continue
             if safe_float(t, "rug_ratio", 1.0) > 0.50:
+                continue
+                
+            # Honeypot & Tax Filters
+            is_honeypot = safe_int(t, "is_honeypot", 0)
+            if is_honeypot != 0:
+                continue
+            buy_tax = safe_float(t, "buy_tax", 0.0)
+            sell_tax = safe_float(t, "sell_tax", 0.0)
+            if buy_tax > 0.0 or sell_tax > 0.0:
                 continue
                 
             ath_mcap = safe_float(t, "history_highest_market_cap", 0.0)
