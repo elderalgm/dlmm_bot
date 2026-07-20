@@ -15,13 +15,19 @@ if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
-# Config Logging
+# Config Logging with Rotation to prevent filling up the VPS disk (max 10MB, max 5 backups)
+from logging.handlers import RotatingFileHandler
+log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+rotating_handler = RotatingFileHandler("bot.log", maxBytes=10*1024*1024, backupCount=5, encoding="utf-8")
+rotating_handler.setFormatter(log_formatter)
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setFormatter(log_formatter)
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("bot.log", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout)
+        rotating_handler,
+        stream_handler
     ]
 )
 
