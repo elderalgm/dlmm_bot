@@ -1,14 +1,14 @@
 {
   "rpc_url": "YOUR_SOLANA_RPC_URL",
   "wallet_private_key": "YOUR_WALLET_PRIVATE_KEY_BASE58",
-  "telegram_token": "8294386833:AAHhZzW-7bWmXIeTJXSwLCgEX0VgzOnUBWo",
-  "chat_id": "1741438724",
-  "gmgn_api_key": "gmgn_bd2444c0472e8194980316c0ce4077f5",
+  "telegram_token": "YOUR_TELEGRAM_BOT_TOKEN",
+  "chat_id": "YOUR_TELEGRAM_CHAT_ID",
+  "gmgn_api_key": "YOUR_GMGN_API_KEY",
+  "jupiter_api_key": "YOUR_JUPITER_API_KEY",
   "dry_run": false,
   "gas_reserve": 0.05,
   "min_tvl": 15000,
   "min_bin_step": 80,
   "min_base_fee_pct": 2.0,
-  "jupiter_api_key": "jup_73f07fdfb62a2313d6afa8e0e5dac69802f6259ed350658a7bad6d2b4ca21af1",
   "priority_fee_micro_lamports": 100000
 }

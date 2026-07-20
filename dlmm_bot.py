@@ -32,6 +32,14 @@ STATE_PATH = "state.json"
 # Load Configuration
 def load_config():
     config = {}
+    if not os.path.exists(CONFIG_PATH) and os.path.exists("config.example.json"):
+        try:
+            import shutil
+            shutil.copy("config.example.json", CONFIG_PATH)
+            logging.info("Created config.json from config.example.json")
+        except Exception as e:
+            logging.error(f"Error copying config.example.json: {e}")
+
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:

@@ -1,5 +1,16 @@
-node_modules/
+# Secrets and Configuration
+config.json
+.env
+*.env
+
+# Logs and State
+*.log
 bot.log
 state.json
+full_wallet_audit.json
+
+# Dependencies and Cache
+node_modules/
 __pycache__/
 *.pyc
+.DS_Store
