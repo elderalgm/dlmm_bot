@@ -138,8 +138,9 @@ nano config.json
 *(Özel anahtarınızı ve API bilgilerinizi girip kaydedin)*
 
 ### Adım 4: pm2 ile Arka Planda Başlatma
+Projede hazır bulunan `ecosystem.config.js` yapılandırma dosyası sayesinde botu tek komutla (bellek limiti ve otomatik başlama optimizasyonları ile birlikte) başlatabilirsiniz:
 ```bash
-pm2 start dlmm_bot.py --name "dlmm-bot" --interpreter python3
+pm2 start
 pm2 save
 pm2 startup
 ```
