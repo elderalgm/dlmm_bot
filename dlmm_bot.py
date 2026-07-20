@@ -58,7 +58,8 @@ def load_config():
         "gas_reserve": float(os.environ.get("GAS_RESERVE", config.get("gas_reserve", 0.05))),
         "min_tvl": float(os.environ.get("MIN_TVL", config.get("min_tvl", 15000))),
         "min_bin_step": int(os.environ.get("MIN_BIN_STEP", config.get("min_bin_step", 80))),
-        "min_base_fee_pct": float(os.environ.get("MIN_BASE_FEE_PCT", config.get("min_base_fee_pct", 2.0)))
+        "min_base_fee_pct": float(os.environ.get("MIN_BASE_FEE_PCT", config.get("min_base_fee_pct", 2.0))),
+        "state_sync_interval_seconds": int(os.environ.get("STATE_SYNC_INTERVAL_SECONDS", config.get("state_sync_interval_seconds", 1800)))
     }
     return merged
 
@@ -2384,8 +2385,9 @@ def main():
                 logging.error(f"Error in telegram commands loop: {e}")
             last_telegram_tick = time.time()
             
-        # Sync local state with actual on-chain positions (Self-Healing Loop) every 5 minutes (300 seconds)
-        if now - last_state_sync >= 300:
+        # Sync local state with actual on-chain positions (Self-Healing Loop) using dynamic interval config
+        sync_interval = config.get("state_sync_interval_seconds", 1800)
+        if now - last_state_sync >= sync_interval:
             try:
                 config = load_config() # Reload config dynamically
                 reconstruct_state_from_chain(config, state)
