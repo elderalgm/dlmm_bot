@@ -274,12 +274,33 @@ async function cmdClose(config, poolAddressStr, positionAddressStr) {
   const poolPubKey = new PublicKey(poolAddressStr);
   const positionPubKey = new PublicKey(positionAddressStr);
   
-  const pool = await DLMM.create(connection, poolPubKey);
-  const positionData = await pool.getPosition(positionPubKey);
+  let positionData;
+  try {
+    positionData = await pool.getPosition(positionPubKey);
+  } catch (err) {
+    if (err.message && (err.message.includes("reading 'binId'") || err.message.includes("not found") || err.message.includes("undefined"))) {
+      console.log("Position already closed or not found on-chain.");
+      return {
+        success: true,
+        already_closed: true,
+        txs: [],
+        token_x_mint: pool.lbPair.tokenXMint.toString(),
+        token_x_amount: 0
+      };
+    }
+    throw err;
+  }
   
   const processed = positionData?.positionData;
   if (!processed) {
-    throw new Error("Could not find position data on-chain.");
+    console.log("Position data empty on-chain, position already closed.");
+    return {
+      success: true,
+      already_closed: true,
+      txs: [],
+      token_x_mint: pool.lbPair.tokenXMint.toString(),
+      token_x_amount: 0
+    };
   }
   
   const lowerBinId = processed.lowerBinId;
