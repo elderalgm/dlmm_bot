@@ -19,7 +19,8 @@ Bot, GMGN.ai üzerinden güvenlik testlerini geçen bir token için Meteora DLMM
 1. **TVL (Toplam Kilitli Değer) Eşiği:** Havuzun anlık TVL değeri `config.json` dosyasındaki `min_tvl` (Varsayılan: **$15.000**) değerinden büyük veya eşit olmalıdır. Küçük havuzlar likidite yetersizliği nedeniyle elenir.
 2. **Bin Step (Fiyat Adım Genişliği):** Havuzun Bin Step değeri `config.get("min_bin_step", 80)` değerinden büyük veya eşit olmalıdır. Düşük bin step değerine sahip havuzlar elenir.
 3. **Temel Komisyon Oranı (Base Fee):** Havuzun ürettiği temel ticaret komisyon oranı `config.get("min_base_fee_pct", 2.0)` (%2.0) değerinden büyük veya eşit olmalıdır. Düşük fee üreten havuzlar karlı olmadığı için elenir.
-4. **Sıralama Algoritması:** Filtreleri geçen havuzlar kendi içinde puanlanır. TVL kriterini sağlayan havuzlar önceliklendirilir ve en yüksek TVL'e sahip olan havuz pozisyon açılmak üzere seçilir.
+4. **Komisyon Modu (Collect Fee Mode):** Havuzun komisyon toplama modu `0` (Both Tokens - Çift Yönlü) veya `1` (Quote Only - SOL) olmalıdır. Mod 2 elenir.
+5. **Sıralama Algoritması:** Filtreleri geçen havuzlar kendi içinde puanlanır. TVL kriterini sağlayan havuzlar önceliklendirilir ve en yüksek TVL'e sahip olan havuz pozisyon açılmak üzere seçilir.
 
 ---
 
@@ -36,6 +37,9 @@ Seçilen havuzda pozisyon açılışı, [meteora_bridge.js](file:///c:/Users/ASU
    * Havuz hem Token hem SOL kazandırıyorsa (`collect_fee_mode == 0`) **VE** komisyon oranı `%5`'ten küçükse (`base_fee_pct < 5.0`): Pozisyon **`StrategyType.BidAsk`** ile açılır. Likidite aktif fiyata yakın yoğunlaşır.
    * Diğer durumlarda Pozisyon **`StrategyType.Spot`** ile açılır. Likidite fiyat aralığına eşit olarak dağıtılır.
 5. **Ağ İşlem Gönderimi:** İşlem öncelikli ücreti (`priority_fee_micro_lamports`) eklenerek imzalanır ve ağa iletilir.
+6. **Bakiye ve Pozisyon Kapasitesi:** 
+   * Bot, kullanılabilir cüzdan bakiyesinin tamamını (gaz rezervi ve rent hariç) tek seferde ilk bulunan pozisyona yatırır. Bu nedenle bot **aynı anda maksimum 1 adet pozisyon** açar.
+   * İlk pozisyonun açılabilmesi için cüzdanda **minimum ~0.31 SOL** (Rent ~0.25 SOL + Gaz Rezervi 0.05 SOL + Min İşlem 0.01 SOL) bakiye bulunmalıdır. Rahat çalışma için 0.35 - 0.50 SOL önerilir.
 
 ---
 
