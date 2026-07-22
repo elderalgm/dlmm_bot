@@ -1329,7 +1329,7 @@ def check_telegram_commands(config, state):
                 # Handle /close_tokenaddress direct text command
                 token_address = text.split("_", 1)[1]
                 handle_telegram_close_position(config, state, token_address)
-            elif cmd.startswith("/buy") or cmd.startswith("buy"):
+            elif cmd.startswith("/buy") or cmd.startswith("buy") or cmd == "🛒 manuel alım":
                 # Normalize command separators: replace _ with space
                 normalized_text = text.replace("_", " ")
                 parts = normalized_text.split()
@@ -1384,8 +1384,9 @@ def send_telegram_menu(config, state):
     menu_keyboard = {
         "keyboard": [
             [{"text": "📊 Status"}, {"text": "📈 Active Positions"}],
-            [{"text": "🔍 Aday Tokenler"}, {"text": "📋 History"}],
-            [{"text": mode_btn_text}, {"text": pause_btn_text}]
+            [{"text": "🛒 Manuel Alım"}, {"text": "🔍 Aday Tokenler"}],
+            [{"text": "📋 History"}, {"text": mode_btn_text}],
+            [{"text": pause_btn_text}]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
@@ -1395,16 +1396,17 @@ def send_telegram_menu(config, state):
     status_str = "⏸ Durduruldu" if is_p else "▶️ Aktif (Çalışıyor)"
     
     msg = (
-        "🤖 <b>Meteora DLMM Standalone Bot Menüsü</b>\n\n"
+        "🤖 <b>Meteora DLMM Trading Bot Menüsü</b>\n\n"
         f"<b>Durum:</b> {status_str}\n"
         f"<b>Mod:</b> {mode_str}\n\n"
         "Aşağıdaki butonları kullanarak botu yönetebilirsiniz:\n"
         "• <b>📊 Status</b>: Durum raporu ve bakiye.\n"
         "• <b>📈 Active Positions</b>: Açık pozisyonlar ve manuel kapatma.\n"
+        "• <b>🛒 Manuel Alım</b>: İstediğiniz token kontratına manuel pozisyon açar.\n"
         "• <b>🔍 Aday Tokenler</b>: GMGN listesinden filtreleri geçen adaylar.\n"
+        "• <b>📋 History</b>: Son kapatılan işlem geçmişi.\n"
         f"• <b>{mode_btn_text}</b>: Bot çalışma modunu değiştirir.\n"
-        f"• <b>{pause_btn_text}</b>: Bot işlemlerini geçici olarak durdurur/başlatır.\n"
-        "• <b>📋 History</b>: Son 5 kapatılan işlem."
+        f"• <b>{pause_btn_text}</b>: Bot taramasını geçici durdurur/başlatır."
     )
     send_telegram(config, msg, reply_markup=menu_keyboard)
 
@@ -1413,16 +1415,11 @@ def handle_telegram_status(config, state):
     bal_res = run_bridge(["get-balance"])
     balance_str = f"{bal_res.get('balance', 0.0):.4f} SOL" if bal_res.get("success") else f"Hata ({bal_res.get('error', 'Bilinmeyen Hata')})"
 
-    
     dry_run = is_dry_run(config, state)
     mode_str = "🧪 DRY RUN (Simülasyon)" if dry_run else "🟢 LIVE TRADING (Gerçek)"
     
     is_p = is_paused(state)
     status_str = "⏸ Durduruldu" if is_p else "▶️ Aktif (Çalışıyor)"
-    
-    # RPC Credits
-    used_credits, limit = get_live_helius_credits()
-    credits_status = "🔴 Limit Aşımı" if used_credits >= limit * 0.90 else "🟢 Normal"
     
     msg = (
         "📊 <b>BOT DURUM RAPORU</b>\n"
@@ -1430,11 +1427,12 @@ def handle_telegram_status(config, state):
         f"<b>Bot Durumu:</b> {status_str}\n"
         f"<b>Çalışma Modu:</b> {mode_str}\n"
         f"<b>Cüzdan Bakiyesi:</b> <code>{balance_str}</code>\n"
-        f"<b>Helius RPC Kullanımı:</b> {used_credits:,} / {limit:,} ({credits_status})\n"
         f"<b>Aktif Pozisyon Sayısı:</b> {len(state.get('active_positions', {}))}\n"
         f"<b>Gaz Rezervi:</b> {config.get('gas_reserve', 0.05)} SOL\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "<b>Tarama Kriterleri:</b>\n"
+        "<b>Strateji & Tarama Kriterleri:</b>\n"
+        f"• Varsayılan Range: -%91\n"
+        f"• Dinamik Strateji: Fee < %5 ise Bid-Ask, aksi halde Spot\n"
         f"• Min TVL: ${config.get('min_tvl', 15000):,}\n"
         f"• Min Bin Step: {config.get('min_bin_step', 80)}\n"
         f"• Min Base Fee: %{config.get('min_base_fee_pct', 2.0)}"
