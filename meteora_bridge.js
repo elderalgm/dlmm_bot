@@ -274,6 +274,7 @@ async function cmdClose(config, poolAddressStr, positionAddressStr) {
   const poolPubKey = new PublicKey(poolAddressStr);
   const positionPubKey = new PublicKey(positionAddressStr);
   
+  const pool = await DLMM.create(connection, poolPubKey);
   let positionData;
   try {
     positionData = await pool.getPosition(positionPubKey);
