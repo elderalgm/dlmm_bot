@@ -942,9 +942,9 @@ def check_tokens(config, state):
                 continue
                 
             # Condition 2: Historical breakout & dump allowance
-            # Find the most recent breakout in last 50 candles (searching newest to oldest)
+            # Find the most recent breakout in last 50 closed candles (searching newest to oldest)
             breakout_idx = None
-            for neg_idx in range(-1, -min(50, len(df)) - 1, -1):
+            for neg_idx in range(-2, -min(50, len(df)) - 1, -1):
                 pos_idx = len(df) + neg_idx
                 c = df.iloc[pos_idx]
                 prev_max = df.iloc[:pos_idx]['high'].max()
