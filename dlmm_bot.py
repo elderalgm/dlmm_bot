@@ -1889,7 +1889,7 @@ def check_pool_filters(config, p):
         failed.append(f"TVL Düşük (${tvl:,.0f} < ${min_tvl:,.0f})")
         
     core_failed = []
-    if collect_fee_mode != 1:
+    if collect_fee_mode not in (0, 1):
         core_failed.append(f"Ücret Modu Hatalı (Mode={collect_fee_mode})")
     if bin_step < min_bin_step:
         core_failed.append(f"Bin Step Düşük ({bin_step} < {min_bin_step})")
