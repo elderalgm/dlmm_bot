@@ -275,20 +275,25 @@ async function cmdClose(config, poolAddressStr, positionAddressStr) {
   const positionPubKey = new PublicKey(positionAddressStr);
   
   const pool = await DLMM.create(connection, poolPubKey);
+  
+  // Raw on-chain verification: check if position account actually exists on Solana mainnet
+  const posAccountInfo = await connection.getAccountInfo(positionPubKey);
+  if (!posAccountInfo || !posAccountInfo.data || posAccountInfo.data.length === 0) {
+    console.log("Position account does not exist on Solana mainnet. Position is 100% confirmed closed on-chain.");
+    return {
+      success: true,
+      already_closed: true,
+      txs: [],
+      token_x_mint: pool.lbPair.tokenXMint.toString(),
+      token_x_amount: 0
+    };
+  }
+
   let positionData;
   try {
     positionData = await pool.getPosition(positionPubKey);
   } catch (err) {
-    if (err.message && (err.message.includes("reading 'binId'") || err.message.includes("not found") || err.message.includes("undefined"))) {
-      console.log("Position already closed or not found on-chain.");
-      return {
-        success: true,
-        already_closed: true,
-        txs: [],
-        token_x_mint: pool.lbPair.tokenXMint.toString(),
-        token_x_amount: 0
-      };
-    }
+    console.error("Meteora SDK getPosition error while account exists on-chain:", err.message);
     throw err;
   }
   
