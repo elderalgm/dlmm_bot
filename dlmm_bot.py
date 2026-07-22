@@ -964,9 +964,19 @@ def check_tokens(config, state):
                 logging.warning(f"Aborting open: insufficient balance. Sol: {wallet_sol}, Rent: {refundable_rent}, Reserve: {gas_reserve}")
                 continue
                 
-            logging.info(f"🔔 OPEN SIGNAL for {symbol} ({address}) in pool {pool_address}. Deposit Amount: {deposit_sol:.4f} SOL")
+            cfg = selected_pool.get("pool_config") or {}
+            collect_fee_mode = safe_int(cfg, "collect_fee_mode", -1)
+            base_fee_pct = safe_float(cfg, "base_fee_pct", 0.0)
             
-            open_res = run_bridge(["open", pool_address, f"{deposit_sol:.6f}"])
+            # Dynamic strategy selection: if Both Tokens fee mode AND base fee < 5.0%, use bid-ask
+            if collect_fee_mode == 0 and base_fee_pct < 5.0:
+                strategy = "bid-ask"
+            else:
+                strategy = "spot"
+                
+            logging.info(f"🔔 OPEN SIGNAL for {symbol} ({address}) in pool {pool_address}. Deposit: {deposit_sol:.4f} SOL, Strategy: {strategy}, Range: -91%")
+            
+            open_res = run_bridge(["open", pool_address, f"{deposit_sol:.6f}", "91", strategy])
             if open_res.get("success"):
                 pos_addr = open_res.get("position")
                 state["active_positions"][address] = {
@@ -988,6 +998,7 @@ def check_tokens(config, state):
                     f"<b>Pool Address:</b> <code>{pool_address}</code>\n"
                     f"<b>Position:</b> <code>{pos_addr}</code>\n"
                     f"<b>Deposit:</b> {deposit_sol:.5f} SOL\n"
+                    f"<b>Strategy:</b> {strategy.upper()}\n"
                     f"<b>Refundable Rent:</b> {open_res.get('refundable_rent'):.5f} SOL\n"
                     f"<b>Range:</b> {open_res.get('lower_bin')} to {open_res.get('upper_bin')}\n"
                     f"🔗 <a href='https://gmgn.ai/sol/token/{address}'>View on GMGN</a>"
@@ -2139,7 +2150,7 @@ def handle_manual_buy_callback(config, state, chat_id, cb_data):
 
 
 # ─── Manual Position Opener ───────────────────────────────────
-def handle_telegram_buy_token(config, state, token_address, deposit_amount_override=None, downside_pct=92, strategy="spot"):
+def handle_telegram_buy_token(config, state, token_address, deposit_amount_override=None, downside_pct=91, strategy="spot"):
     send_telegram(config, f"🔍 <b>Manuel Alım Talebi:</b> <code>{token_address}</code> araştırılıyor...\n• Yüzde: -%{downside_pct}\n• Strateji: {strategy.upper()}")
     
     # 1. Fetch pools

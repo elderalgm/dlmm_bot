@@ -90,7 +90,7 @@ async function cmdCheckRange(config, poolAddressStr, downsidePctStr) {
   const activePriceUnscaled = Number(activeBin.price.toString());
   const activePriceScaled = Number(pool.fromPricePerLamport(activeBin.price));
   
-  let downsidePct = 92;
+  let downsidePct = 91;
   if (downsidePctStr) {
     const val = parseFloat(downsidePctStr);
     if (!isNaN(val) && val > 0 && val < 100) {
@@ -151,7 +151,7 @@ async function cmdOpen(config, poolAddressStr, amountSolStr, downsidePctStr, str
   
   const activePriceUnscaled = Number(activeBin.price.toString());
   
-  let downsidePct = 92;
+  let downsidePct = 91;
   if (downsidePctStr) {
     const val = parseFloat(downsidePctStr);
     if (!isNaN(val) && val > 0 && val < 100) {

@@ -27,12 +27,14 @@ Bot, GMGN.ai üzerinden güvenlik testlerini geçen bir token için Meteora DLMM
 
 Seçilen havuzda pozisyon açılışı, [meteora_bridge.js](file:///c:/Users/ASUS/.gemini/antigravity-ide/scratch/dlmm_bot/meteora_bridge.js#L140) içindeki `cmdOpen` fonksiyonu ile tamamen on-chain olarak yürütülür:
 
-1. **Aralık Hesaplama (Downside Range):** Aktif bin fiyatı baz alınarak **-%92** (veya config'deki özel değer) oranında aşağı yönlü fiyat sınırı hesaplanır.
-   $$\text{Lower Price} = \text{Active Price} \times (1 - \frac{\text{downside\_pct}}{100})$$
+1. **Aralık Hesaplama (Downside Range):** Aktif bin fiyatı baz alınarak **-%91** oranında aşağı yönlü fiyat sınırı hesaplanır.
+   $$\text{Lower Price} = \text{Active Price} \times (1 - \frac{91}{100})$$
    Bu fiyat adımı, havuzun `binStep` parametresi kullanılarak DLMM SDK'sının `getBinIdFromPrice` fonksiyonu ile `lowerBinId` değerine çevrilir.
 2. **Kira Kontrolü ve Engelleme (Bin Array Check):** `lowerBinId` ile `activeBinId` aralığındaki tüm fiyat kutularının (bin arrays) Solana üzerinde önceden başlatılıp başlatılmadığı sorgulanır. Eğer başlatılmamış (uninitialized) en ufak bir kutu varsa, **Solana ağına geri iadesiz kira harcaması yapmamak için** işlem anında iptal edilir (`missingCount == 0` zorunluluğu).
 3. **Kira Muafiyeti Hesaplama (Rent Exemption):** Açılacak pozisyon hesabının kaplayacağı alan için gereken Solana kira miktarı `getPositionRentExemption` SDK fonksiyonu ile dinamik olarak sorgulanır. Bu bakiye (`~0.15 - 0.25 SOL`), pozisyon kapatıldığında cüzdana tam olarak iade edilir.
-4. **Likidite Ekleme (Spot Stratejisi):** Belirlenen SOL miktarı havuzun token oranına göre tek taraflı (Single-sided token Y yani SOL) olarak eklenir. `StrategyType.Spot` kullanılarak likidite fiyat aralığına eşit olarak dağıtılır.
+4. **Dinamik Likidite Stratejisi (Spot vs. Bid-Ask):** 
+   * Havuz hem Token hem SOL kazandırıyorsa (`collect_fee_mode == 0`) **VE** komisyon oranı `%5`'ten küçükse (`base_fee_pct < 5.0`): Pozisyon **`StrategyType.BidAsk`** ile açılır. Likidite aktif fiyata yakın yoğunlaşır.
+   * Diğer durumlarda Pozisyon **`StrategyType.Spot`** ile açılır. Likidite fiyat aralığına eşit olarak dağıtılır.
 5. **Ağ İşlem Gönderimi:** İşlem öncelikli ücreti (`priority_fee_micro_lamports`) eklenerek imzalanır ve ağa iletilir.
 
 ---
