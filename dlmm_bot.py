@@ -1432,7 +1432,7 @@ def handle_telegram_status(config, state):
         "━━━━━━━━━━━━━━━━━━\n"
         "<b>Strateji & Tarama Kriterleri:</b>\n"
         f"• Varsayılan Range: -%91\n"
-        f"• Dinamik Strateji: Fee < %5 ise Bid-Ask, aksi halde Spot\n"
+        f"• Dinamik Strateji: Fee %5'ten küçükse Bid-Ask, aksi halde Spot\n"
         f"• Min TVL: ${config.get('min_tvl', 15000):,}\n"
         f"• Min Bin Step: {config.get('min_bin_step', 80)}\n"
         f"• Min Base Fee: %{config.get('min_base_fee_pct', 2.0)}"
