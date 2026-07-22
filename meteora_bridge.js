@@ -312,15 +312,44 @@ async function cmdClose(config, poolAddressStr, positionAddressStr) {
   const lowerBinId = processed.lowerBinId;
   const upperBinId = processed.upperBinId;
   
-  // Claim fees & remove liquidity
-  const closeTx = await pool.removeLiquidity({
-    user: wallet.publicKey,
-    position: positionPubKey,
-    fromBinId: lowerBinId,
-    toBinId: upperBinId,
-    bps: new BN(10000),
-    shouldClaimAndClose: true
-  });
+  // 1. Check if position has liquidity or pending unclaimed fees
+  const positionBinData = processed.positionBinData || [];
+  let hasLiquidity = false;
+  let hasPendingFees = false;
+
+  for (const bin of positionBinData) {
+    const positionLiquidity = new BN(bin.positionLiquidity || "0");
+    if (!positionLiquidity.isZero()) hasLiquidity = true;
+    
+    const feeX = new BN(bin.positionFeeXAmount || "0");
+    const feeY = new BN(bin.positionFeeYAmount || "0");
+    if (!feeX.isZero() || !feeY.isZero()) hasPendingFees = true;
+    
+    if (hasLiquidity && hasPendingFees) break;
+  }
+
+  console.log(`Position check: hasLiquidity=${hasLiquidity}, hasPendingFees=${hasPendingFees}`);
+
+  // 2. Select appropriate close method & exact parameter types expected by Meteora SDK
+  let closeTx;
+  if (hasLiquidity || hasPendingFees) {
+    // pool.removeLiquidity expects position: positionPubKey (PublicKey instance)
+    closeTx = await pool.removeLiquidity({
+      user: wallet.publicKey,
+      position: positionPubKey,
+      fromBinId: lowerBinId,
+      toBinId: upperBinId,
+      bps: new BN(10000),
+      shouldClaimAndClose: true
+    });
+  } else {
+    // pool.closePositionIfEmpty expects position: { publicKey: positionPubKey } (LbPosition object)
+    console.log("Position is empty (0 liquidity & 0 pending fees). Closing via closePositionIfEmpty to reclaim rent...");
+    closeTx = await pool.closePositionIfEmpty({
+      owner: wallet.publicKey,
+      position: { publicKey: positionPubKey }
+    });
+  }
   
   const txHashes = [];
   const closeTxArray = Array.isArray(closeTx) ? closeTx : [closeTx];
