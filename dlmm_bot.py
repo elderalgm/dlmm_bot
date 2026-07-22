@@ -64,7 +64,8 @@ def load_config():
         "gas_reserve": float(os.environ.get("GAS_RESERVE", config.get("gas_reserve", 0.05))),
         "min_tvl": float(os.environ.get("MIN_TVL", config.get("min_tvl", 15000))),
         "min_bin_step": int(os.environ.get("MIN_BIN_STEP", config.get("min_bin_step", 80))),
-        "priority_fee_micro_lamports": int(os.environ.get("PRIORITY_FEE_MICRO_LAMPORTS", config.get("priority_fee_micro_lamports", 25000))),
+        "min_base_fee_pct": float(os.environ.get("MIN_BASE_FEE_PCT", config.get("min_base_fee_pct", 2.0))),
+        "priority_fee_micro_lamports": int(os.environ.get("PRIORITY_FEE_MICRO_LAMPORTS", 25000 if config.get("priority_fee_micro_lamports", 25000) >= 100000 else config.get("priority_fee_micro_lamports", 25000))),
         "state_sync_interval_seconds": int(os.environ.get("STATE_SYNC_INTERVAL_SECONDS", config.get("state_sync_interval_seconds", 1800)))
     }
     return merged
@@ -1219,9 +1220,9 @@ def handle_telegram_candidates(config, state):
                     if last_candle.get("ST_dir", -1) != 1:
                         reason = "❌ Supertrend Kırmızı"
                     else:
-                        # Find the most recent breakout in last 50 candles (searching newest to oldest)
+                        # Find the most recent breakout in last 50 closed candles (searching newest to oldest)
                         breakout_idx = None
-                        for neg_idx in range(-1, -min(50, len(df)) - 1, -1):
+                        for neg_idx in range(-2, -min(50, len(df)) - 1, -1):
                             pos_idx = len(df) + neg_idx
                             c = df.iloc[pos_idx]
                             prev_max = df.iloc[:pos_idx]['high'].max()
