@@ -226,18 +226,39 @@ async function cmdOpen(config, poolAddressStr, amountSolStr, downsidePctStr, str
     }
     
     // Phase 2: Add liquidity
-    const addTxs = await pool.addLiquidityByStrategyChunkable({
-      positionPubKey: newPosition.publicKey,
-      user: wallet.publicKey,
-      totalXAmount: totalXLamports,
-      totalYAmount: totalYLamports,
-      strategy: { minBinId: lowerBinId, maxBinId: activeBin.binId, strategyType },
-      slippage: 1000 // 10%
-    });
-    const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
-    for (let i = 0; i < addTxArray.length; i++) {
-      const txHash = await sendAndConfirmTransactionWithFees(connection, addTxArray[i], [wallet]);
-      txHashes.push(txHash);
+    try {
+      const addTxs = await pool.addLiquidityByStrategyChunkable({
+        positionPubKey: newPosition.publicKey,
+        user: wallet.publicKey,
+        totalXAmount: totalXLamports,
+        totalYAmount: totalYLamports,
+        strategy: { minBinId: lowerBinId, maxBinId: activeBin.binId, strategyType },
+        slippage: 1000 // 10%
+      });
+      const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
+      for (let i = 0; i < addTxArray.length; i++) {
+        const txHash = await sendAndConfirmTransactionWithFees(connection, addTxArray[i], [wallet]);
+        txHashes.push(txHash);
+      }
+    } catch (addErr) {
+      console.error("Phase 2 Add Liquidity failed. Cleaning up empty position account to refund rent...", addErr.message);
+      try {
+        const closeTx = await pool.removeLiquidity({
+          user: wallet.publicKey,
+          position: newPosition.publicKey,
+          fromBinId: lowerBinId,
+          toBinId: activeBin.binId,
+          bps: new BN(10000),
+          shouldClaimAndClose: true
+        });
+        const closeTxArray = Array.isArray(closeTx) ? closeTx : [closeTx];
+        for (const tx of closeTxArray) {
+          await sendAndConfirmTransactionWithFees(connection, tx, [wallet]);
+        }
+      } catch (cleanupErr) {
+        console.error("Failed to cleanup empty position account:", cleanupErr.message);
+      }
+      throw addErr;
     }
   } else {
     // Standard position
