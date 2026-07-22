@@ -10,6 +10,6 @@
   "min_tvl": 15000,
   "min_bin_step": 80,
   "min_base_fee_pct": 2.0,
-  "priority_fee_micro_lamports": 100000,
+  "priority_fee_micro_lamports": 25000,
   "state_sync_interval_seconds": 1800
 }

@@ -64,7 +64,7 @@ def load_config():
         "gas_reserve": float(os.environ.get("GAS_RESERVE", config.get("gas_reserve", 0.05))),
         "min_tvl": float(os.environ.get("MIN_TVL", config.get("min_tvl", 15000))),
         "min_bin_step": int(os.environ.get("MIN_BIN_STEP", config.get("min_bin_step", 80))),
-        "min_base_fee_pct": float(os.environ.get("MIN_BASE_FEE_PCT", config.get("min_base_fee_pct", 2.0))),
+        "priority_fee_micro_lamports": int(os.environ.get("PRIORITY_FEE_MICRO_LAMPORTS", config.get("priority_fee_micro_lamports", 25000))),
         "state_sync_interval_seconds": int(os.environ.get("STATE_SYNC_INTERVAL_SECONDS", config.get("state_sync_interval_seconds", 1800)))
     }
     return merged
@@ -134,6 +134,38 @@ def save_state(state, backup=True):
                 threading.Thread(target=do_backup, daemon=True).start()
             except Exception as e:
                 logging.warning(f"Failed to start remote backup thread: {e}")
+
+# ─── Exponential Backoff Cooldown Helpers ─────────────────────
+def check_cooldown(state, key):
+    cooldowns = state.get("cooldowns", {})
+    entry = cooldowns.get(key)
+    if not entry:
+        return True, 0
+    now = time.time()
+    until = entry.get("until", 0)
+    if now < until:
+        return False, int(until - now)
+    return True, 0
+
+def register_failure(state, key):
+    if "cooldowns" not in state:
+        state["cooldowns"] = {}
+    entry = state["cooldowns"].get(key, {"count": 0})
+    count = entry.get("count", 0) + 1
+    # Exponential backoff: 1st error = 5s, 2nd = 15s, 3rd = 45s, 4th+ = 90s max
+    delay = min(5 * (3 ** (count - 1)), 90)
+    state["cooldowns"][key] = {
+        "count": count,
+        "until": time.time() + delay
+    }
+    save_state(state)
+    logging.info(f"⏳ Cooldown registered for {key}: Attempt #{count}, backing off for {delay}s.")
+    return delay
+
+def clear_failure(state, key):
+    if "cooldowns" in state and key in state["cooldowns"]:
+        del state["cooldowns"][key]
+        save_state(state)
 
 def is_dry_run(config, state):
     override = state.get("dry_run_override")
@@ -286,6 +318,7 @@ def execute_close_and_swap(config, state, token_address, reason):
     close_res = run_bridge(["close", pool, pos_addr])
     
     if close_res.get("success") or close_res.get("dry_run"):
+        clear_failure(state, token_address)
         token_x_amount = close_res.get("token_x_amount", 0.0)
         token_x_mint = close_res.get("token_x_mint")
         
@@ -406,6 +439,8 @@ def execute_close_and_swap(config, state, token_address, reason):
         return {"success": True}
     else:
         err = close_res.get("error", "Bilinmeyen Hata")
+        delay = register_failure(state, token_address)
+        logging.error(f"execute_close_and_swap failed for {symbol}: {err}. Backing off for {delay}s.")
         return {"success": False, "error": err}
 
 # Telegram Notification
@@ -974,10 +1009,17 @@ def check_tokens(config, state):
             else:
                 strategy = "spot"
                 
+            # Check exponential backoff cooldown
+            allowed, remaining = check_cooldown(state, address)
+            if not allowed:
+                logging.info(f"Skipping open attempt for {symbol} due to exponential backoff cooldown ({remaining}s remaining).")
+                continue
+                
             logging.info(f"🔔 OPEN SIGNAL for {symbol} ({address}) in pool {pool_address}. Deposit: {deposit_sol:.4f} SOL, Strategy: {strategy}, Range: -91%")
             
             open_res = run_bridge(["open", pool_address, f"{deposit_sol:.6f}", "91", strategy])
             if open_res.get("success"):
+                clear_failure(state, address)
                 pos_addr = open_res.get("position")
                 state["active_positions"][address] = {
                     "symbol": symbol,
@@ -1004,9 +1046,9 @@ def check_tokens(config, state):
                     f"🔗 <a href='https://gmgn.ai/sol/token/{address}'>View on GMGN</a>"
                 )
                 send_telegram(config, msg)
-                logging.info(f"Position successfully opened: {pos_addr}")
             else:
-                logging.error(f"Failed to open position on-chain: {open_res.get('error')}")
+                delay = register_failure(state, address)
+                logging.error(f"Failed to open position for {symbol}: {open_res.get('error')}. Backing off for {delay}s.")
                 
     except Exception as e:
         logging.error(f"Error checking tokens: {e}")
@@ -1025,6 +1067,12 @@ def monitor_positions(config, state):
         symbol = pos["symbol"]
         pool_address = pos["pool_address"]
         position_address = pos["position_address"]
+        
+        # Check exponential backoff cooldown before processing
+        allowed, remaining = check_cooldown(state, token_address)
+        if not allowed:
+            logging.info(f"Skipping monitor/close attempt for {symbol} due to active cooldown ({remaining}s remaining).")
+            continue
         
         # 1. Check if price is Upward Out-of-Range
         range_check = run_bridge(["get-active-bin", pool_address])
