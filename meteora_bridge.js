@@ -312,15 +312,47 @@ async function cmdClose(config, poolAddressStr, positionAddressStr) {
   const lowerBinId = processed.lowerBinId;
   const upperBinId = processed.upperBinId;
   
-  // Claim fees & remove liquidity
-  const closeTx = await pool.removeLiquidity({
-    user: wallet.publicKey,
-    position: positionPubKey,
-    fromBinId: lowerBinId,
-    toBinId: upperBinId,
-    bps: new BN(10000),
-    shouldClaimAndClose: true
-  });
+  // 1. Check if position has liquidity or unclaimed fees
+  const positionBinData = processed.positionBinData || [];
+  let hasLiquidity = false;
+  let hasFees = false;
+
+  for (const bin of positionBinData) {
+    const positionLiquidity = new BN(bin.positionLiquidity || "0");
+    if (!positionLiquidity.isZero()) hasLiquidity = true;
+    
+    const feeX = new BN(bin.positionFeeXAmount || "0");
+    const feeY = new BN(bin.positionFeeYAmount || "0");
+    if (!feeX.isZero()) hasFees = true;
+    if (!feeY.isZero()) hasFees = true;
+    if (hasLiquidity && hasFees) break;
+  }
+
+  const totalFeeX = new BN(processed.totalClaimedFeeXAmount || processed.feeX || "0");
+  const totalFeeY = new BN(processed.totalClaimedFeeYAmount || processed.feeY || "0");
+  if (!totalFeeX.isZero()) hasFees = true;
+  if (!totalFeeY.isZero()) hasFees = true;
+
+  console.log(`Position check: hasLiquidity=${hasLiquidity}, hasFees=${hasFees}`);
+
+  // 2. Select appropriate close method
+  let closeTx;
+  if (hasLiquidity || hasFees) {
+    closeTx = await pool.removeLiquidity({
+      user: wallet.publicKey,
+      position: { publicKey: positionPubKey },
+      fromBinId: lowerBinId,
+      toBinId: upperBinId,
+      bps: new BN(10000),
+      shouldClaimAndClose: true
+    });
+  } else {
+    console.log("Position is empty (0 liquidity & 0 fees). Closing empty position account to reclaim rent...");
+    closeTx = await pool.closePositionIfEmpty({
+      owner: wallet.publicKey,
+      position: { publicKey: positionPubKey }
+    });
+  }
   
   const txHashes = [];
   const closeTxArray = Array.isArray(closeTx) ? closeTx : [closeTx];
