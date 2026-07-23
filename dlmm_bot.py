@@ -316,7 +316,6 @@ def execute_close_and_swap(config, state, token_address, reason):
         if bal_before.get("success"):
             sol_before = bal_before.get("balance", 0.0)
             
-    # Execute close position on-chain
     logging.info(f"Closing position on-chain for {symbol} ({token_address})...")
     close_res = run_bridge(["close", pool, pos_addr])
     
@@ -325,8 +324,18 @@ def execute_close_and_swap(config, state, token_address, reason):
         token_x_amount = close_res.get("token_x_amount", 0.0)
         token_x_mint = close_res.get("token_x_mint")
         
+        sol_after_close = sol_before
+        if not dry_run:
+            bal_mid = run_bridge(["get-balance"])
+            if bal_mid.get("success"):
+                sol_after_close = bal_mid.get("balance", 0.0)
+                
+        # SOL gained directly from pool close (excluding refundable rent which was returned)
+        sol_gained_close = max(0.0, sol_after_close - sol_before - refundable_rent)
+        
         swap_res = {"success": True, "tx": "N/A"}
         swap_failed_warning = ""
+        sol_gained_swap = 0.0
         
         if not dry_run and token_x_amount > 0 and token_x_mint:
             max_swap_attempts = max(1, int(config.get("close_swap_attempts", 3)))
@@ -345,7 +354,12 @@ def execute_close_and_swap(config, state, token_address, reason):
                 if attempt < max_swap_attempts:
                     time.sleep(min(10, (attempt + 1) * 2))
 
-            if not swap_res.get("success"):
+            if swap_res.get("success"):
+                bal_after = run_bridge(["get-balance"])
+                if bal_after.get("success"):
+                    sol_after_swap = bal_after.get("balance", 0.0)
+                    sol_gained_swap = max(0.0, sol_after_swap - sol_after_close)
+            else:
                 swap_error = html.escape(str(swap_res.get("error", "Bilinmeyen hata")))
                 swap_failed_warning = (
                     "\n\n⚠️ <b>Swap işlemi başarısız oldu!</b> Tokenlar cüzdanda kaldı, "
@@ -353,16 +367,9 @@ def execute_close_and_swap(config, state, token_address, reason):
                     f"\n<b>Son Hata:</b> <code>{swap_error}</code>"
                 )
                 
-        sol_after = 0.0
-        if not dry_run:
-            # Get balance after swap
-            bal_after = run_bridge(["get-balance"])
-            if bal_after.get("success"):
-                sol_after = bal_after.get("balance", 0.0)
-                
         # Calculate PnL / Price changes
         if dry_run:
-            retrieved_sol = initial_spent
+            retrieved_sol = deposit_sol
             pnl = 0.0
             pnl_pct = 0.0
             
@@ -379,13 +386,18 @@ def execute_close_and_swap(config, state, token_address, reason):
             
             pnl_str = f"Simülasyon Modu (Mali Hesaplama Devre Dışı)\n{price_detail_str}"
         else:
-            retrieved_sol = sol_after - sol_before
-            pnl = retrieved_sol - initial_spent
+            if swap_res.get("success") or token_x_amount <= 0:
+                retrieved_sol = sol_gained_close + sol_gained_swap
+                pnl = retrieved_sol - deposit_sol
+            else:
+                retrieved_sol = sol_gained_close
+                pnl = retrieved_sol - deposit_sol
+
             pnl_pct = (pnl / deposit_sol) * 100 if deposit_sol > 0 else 0.0
-            
             pnl_sign = "+" if pnl >= 0 else ""
             pnl_pct_sign = "+" if pnl_pct >= 0 else ""
-            pnl_str = f"<code>{pnl_sign}{pnl:.5f} SOL ({pnl_pct_sign}{pnl_pct:.2f}%)</code>"
+            pending_tag = " (Swap Bekliyor)" if (not swap_res.get("success") and token_x_amount > 0) else ""
+            pnl_str = f"<code>{pnl_sign}{pnl:.5f} SOL ({pnl_pct_sign}{pnl_pct:.2f}%){pending_tag}</code>"
             
         # Update State
         if token_address in state["active_positions"]:
@@ -402,7 +414,8 @@ def execute_close_and_swap(config, state, token_address, reason):
             "pnl": pnl if not dry_run else 0.0,
             "pnl_pct": pnl_pct if not dry_run else 0.0,
             "closed_at": time.time(),
-            "reason": reason
+            "reason": reason,
+            "pending_swap": (not swap_res.get("success") and token_x_amount > 0)
         })
         save_state(state)
         
