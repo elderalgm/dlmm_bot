@@ -35,7 +35,7 @@ logging.basicConfig(
 HOST = "https://openapi.gmgn.ai"
 CONFIG_PATH = "config.json"
 STATE_PATH = "state.json"
-ATH_PROXIMITY_RATIO = 0.80
+ATH_PROXIMITY_RATIO = 0.70
 
 # Load Configuration
 def load_config():
