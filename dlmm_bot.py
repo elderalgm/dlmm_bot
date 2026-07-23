@@ -35,6 +35,8 @@ logging.basicConfig(
 HOST = "https://openapi.gmgn.ai"
 CONFIG_PATH = "config.json"
 STATE_PATH = "state.json"
+SCAN_SKIP_LOG_INTERVAL_SECONDS = 15 * 60
+SCAN_SKIP_LOG_CACHE = {}
 
 # Load Configuration
 def load_config():
@@ -186,6 +188,17 @@ def is_rpc_limit_exceeded(state):
     if used >= limit * 0.90:
         return True
     return False
+
+def log_scan_skip_throttled(address, symbol, reason):
+    now = time.time()
+    entry = SCAN_SKIP_LOG_CACHE.get(address)
+    if (
+        not entry
+        or entry.get("reason") != reason
+        or now - entry.get("logged_at", 0) >= SCAN_SKIP_LOG_INTERVAL_SECONDS
+    ):
+        logging.info(f"SCAN SKIP for {symbol} ({address}): {reason}")
+        SCAN_SKIP_LOG_CACHE[address] = {"reason": reason, "logged_at": now}
 
 def safe_float(d, key, default=0.0):
     if not isinstance(d, dict):
@@ -1057,7 +1070,7 @@ def check_tokens(config, state):
 
             def log_scan_skip(reason):
                 if address in watched_addresses:
-                    logging.info(f"SCAN SKIP for {symbol} ({address}): {reason}")
+                    log_scan_skip_throttled(address, symbol, reason)
             
             # Skip if already holding a position for this token
             if address in state["active_positions"]:
