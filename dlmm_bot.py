@@ -35,8 +35,7 @@ logging.basicConfig(
 HOST = "https://openapi.gmgn.ai"
 CONFIG_PATH = "config.json"
 STATE_PATH = "state.json"
-SCAN_SKIP_LOG_INTERVAL_SECONDS = 15 * 60
-SCAN_SKIP_LOG_CACHE = {}
+ATH_PROXIMITY_RATIO = 0.77
 
 # Load Configuration
 def load_config():
@@ -188,17 +187,6 @@ def is_rpc_limit_exceeded(state):
     if used >= limit * 0.90:
         return True
     return False
-
-def log_scan_skip_throttled(address, symbol, reason):
-    now = time.time()
-    entry = SCAN_SKIP_LOG_CACHE.get(address)
-    if (
-        not entry
-        or entry.get("reason") != reason
-        or now - entry.get("logged_at", 0) >= SCAN_SKIP_LOG_INTERVAL_SECONDS
-    ):
-        logging.info(f"SCAN SKIP for {symbol} ({address}): {reason}")
-        SCAN_SKIP_LOG_CACHE[address] = {"reason": reason, "logged_at": now}
 
 def safe_float(d, key, default=0.0):
     if not isinstance(d, dict):
@@ -1058,115 +1046,79 @@ def check_tokens(config, state):
         tokens = inner_data.get("rank", []) if isinstance(inner_data, dict) else []
 
         now = time.time()
-        watched_addresses = {
-            h.get("token_address")
-            for h in state.get("history", [])
-            if h.get("token_address")
-        }
         
         for t in tokens:
             address = t.get("address")
             symbol = t.get("symbol", "UNKNOWN")
 
-            def log_scan_skip(reason):
-                if address in watched_addresses:
-                    log_scan_skip_throttled(address, symbol, reason)
-            
             # Skip if already holding a position for this token
             if address in state["active_positions"]:
-                log_scan_skip("already holding active position")
                 continue
                 
             # Apply Safety Filters
             renounced_mint = safe_int(t, "renounced_mint", 0)
             renounced_freeze = safe_int(t, "renounced_freeze_account", 0)
             if renounced_mint != 1 or renounced_freeze != 1:
-                log_scan_skip(f"safety renounce failed: mint={renounced_mint}, freeze={renounced_freeze}")
                 continue
                 
             creation_timestamp = safe_float(t, "creation_timestamp", now)
             if now - creation_timestamp < 2 * 3600: # 2 hours
-                age_min = (now - creation_timestamp) / 60
-                log_scan_skip(f"token too new: age={age_min:.1f}m < 120m")
                 continue
                 
             market_cap = safe_float(t, "market_cap", 0.0)
             if market_cap < 250_000:
-                log_scan_skip(f"market cap too low: {market_cap:.0f} < 250000")
                 continue
                 
             volume = safe_float(t, "volume", 0.0)
             if volume < 1_000_000:
-                log_scan_skip(f"volume too low: {volume:.0f} < 1000000")
                 continue
                 
             gas_fee = safe_float(t, "gas_fee", 0.0)
             if gas_fee < 30:
-                log_scan_skip(f"gas fee too low: {gas_fee:.2f} < 30")
                 continue
                 
             holder_count = safe_int(t, "holder_count", 0)
             if holder_count < 900:
-                log_scan_skip(f"holder count too low: {holder_count} < 900")
                 continue
 
-            top_10_holder_rate = safe_float(t, "top_10_holder_rate", 1.0)
-            if top_10_holder_rate > 0.30:
-                log_scan_skip(f"top 10 holder rate too high: {top_10_holder_rate:.4f} > 0.30")
+            if safe_float(t, "top_10_holder_rate", 1.0) > 0.30:
                 continue
-            dev_team_hold_rate = safe_float(t, "dev_team_hold_rate", 1.0)
-            if dev_team_hold_rate > 0.05:
-                log_scan_skip(f"dev team hold rate too high: {dev_team_hold_rate:.4f} > 0.05")
+            if safe_float(t, "dev_team_hold_rate", 1.0) > 0.05:
                 continue
-            bundler_rate = safe_float(t, "bundler_rate", 1.0)
-            if bundler_rate > 0.68:
-                log_scan_skip(f"bundler rate too high: {bundler_rate:.4f} > 0.68")
+            if safe_float(t, "bundler_rate", 1.0) > 0.68:
                 continue
-            entrapment_ratio = safe_float(t, "entrapment_ratio", 1.0)
-            if entrapment_ratio > 0.30:
-                log_scan_skip(f"entrapment ratio too high: {entrapment_ratio:.4f} > 0.30")
+            if safe_float(t, "entrapment_ratio", 1.0) > 0.30:
                 continue
-            rug_ratio = safe_float(t, "rug_ratio", 1.0)
-            if rug_ratio > 0.50:
-                log_scan_skip(f"rug ratio too high: {rug_ratio:.4f} > 0.50")
+            if safe_float(t, "rug_ratio", 1.0) > 0.50:
                 continue
                 
             # Honeypot & Tax Filters
             is_honeypot = safe_int(t, "is_honeypot", 0)
             if is_honeypot != 0:
-                log_scan_skip(f"honeypot flag set: {is_honeypot}")
                 continue
             buy_tax = safe_float(t, "buy_tax", 0.0)
             sell_tax = safe_float(t, "sell_tax", 0.0)
             if buy_tax > 0.0 or sell_tax > 0.0:
-                log_scan_skip(f"tax not zero: buy={buy_tax:.4f}, sell={sell_tax:.4f}")
                 continue
 
             ath_mcap = safe_float(t, "history_highest_market_cap", 0.0)
             if ath_mcap == 0.0:
-                log_scan_skip("missing ATH market cap")
                 continue
 
-            # ATH proximity check: MC >= 80% of ATH
-            if market_cap < ath_mcap * 0.80:
-                log_scan_skip(
-                    f"ATH proximity failed: market_cap={market_cap:.0f}, "
-                    f"ath={ath_mcap:.0f}, ratio={market_cap / ath_mcap * 100:.1f}% < 80.0%"
-                )
+            # ATH proximity check: MC >= configured ratio of ATH
+            if market_cap < ath_mcap * ATH_PROXIMITY_RATIO:
                 continue
                 
             # ─── Technical Analysis Checks ────────────────────────
             klines = get_kline_data(config, address)
             df = calculate_indicators(klines)
             if df is None:
-                log_scan_skip(f"not enough kline data: candles={len(klines)}")
                 continue
                 
             last_candle = df.iloc[-1]
             
             # Condition 1: Must be above Supertrend (dir == 1)
             if last_candle.get("ST_dir", -1) != 1:
-                log_scan_skip(f"supertrend not bullish: ST_dir={last_candle.get('ST_dir')}")
                 continue
                 
             # Condition 2: Historical breakout & dump allowance
@@ -1183,7 +1135,6 @@ def check_tokens(config, state):
                     
             if breakout_idx is None:
                 # No high-volume ATH breakout found recently
-                log_scan_skip("no recent high-volume ATH breakout in last 50 closed candles")
                 continue
                 
             # Condition 3: Has not generated any exit signal since the breakout (only check closed candles)
@@ -1195,14 +1146,12 @@ def check_tokens(config, state):
                     break
                     
             if has_exit_signal_since_breakout:
-                log_scan_skip("exit signal occurred after latest breakout")
                 continue
                 
             # ─── Meteora Pool Checks ──────────────────────────────
             pools = fetch_meteora_pools(address)
             eligible_pools = get_eligible_pools_sorted(config, pools)
             if not eligible_pools:
-                log_scan_skip(f"no eligible Meteora pools: pools={len(pools)}")
                 continue
                 
             selected_pool = None
@@ -1219,7 +1168,6 @@ def check_tokens(config, state):
                     logging.info(f"Skipping pool {p_addr} for {symbol} due to uninitialized bin arrays ({missing_arrays}) or ineligible range.")
 
             if not selected_pool or not range_check:
-                log_scan_skip(f"all eligible pools failed range check: eligible_pools={len(eligible_pools)}")
                 continue
                 
             pool_address = selected_pool["address"]
@@ -1237,10 +1185,6 @@ def check_tokens(config, state):
             
             deposit_sol = wallet_sol - refundable_rent - gas_reserve
             if deposit_sol < 0.01:
-                log_scan_skip(
-                    f"insufficient balance: wallet_sol={wallet_sol:.5f}, "
-                    f"rent={refundable_rent:.5f}, reserve={gas_reserve:.5f}, deposit={deposit_sol:.5f}"
-                )
                 logging.warning(f"Aborting open: insufficient balance. Sol: {wallet_sol}, Rent: {refundable_rent}, Reserve: {gas_reserve}")
                 continue
                 
@@ -1257,7 +1201,6 @@ def check_tokens(config, state):
             # Check exponential backoff cooldown
             allowed, remaining = check_cooldown(state, address)
             if not allowed:
-                log_scan_skip(f"open cooldown active: remaining={remaining}s")
                 logging.info(f"Skipping open attempt for {symbol} due to exponential backoff cooldown ({remaining}s remaining).")
                 continue
                 
@@ -1454,7 +1397,7 @@ def handle_telegram_candidates(config, state):
             
             # If it passes safety, it's a candidate! Let's check indicators
             reason = ""
-            if market_cap < ath_mcap * 0.80:
+            if market_cap < ath_mcap * ATH_PROXIMITY_RATIO:
                 reason = "❌ ATH Yakınlığı Yetersiz"
             else:
                 klines = get_kline_data(config, address)
