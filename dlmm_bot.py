@@ -2052,17 +2052,12 @@ def handle_manual_buy_text(config, state, chat_id, text):
                     del manual_buy_sessions[chat_id]
                 return
                 
-            # Group and sort pools: passing ones first (by TVL desc), failing ones next (by TVL desc)
-            passing_pools = []
-            failing_pools = []
-            for p in pools:
-                passed, failed = check_pool_filters(config, p)
-                if passed:
-                    passing_pools.append((p, failed))
-                else:
-                    failing_pools.append((p, failed))
-                    
-            passing_pools.sort(key=lambda x: get_safe_tvl(x[0]), reverse=True)
+            # Group and sort pools: passing ones first (Quote-Only SOL prioritized), failing ones next
+            passing_dict = {p['address']: (p, failed) for p, failed in [(pool, check_pool_filters(config, pool)[1]) for pool in pools] if not failed}
+            sorted_passing_pools = get_eligible_pools_sorted(config, [item[0] for item in passing_dict.values()])
+            passing_pools = [(p, []) for p in sorted_passing_pools]
+            
+            failing_pools = [(p, failed) for p, failed in [(pool, check_pool_filters(config, pool)[1]) for pool in pools] if failed]
             failing_pools.sort(key=lambda x: get_safe_tvl(x[0]), reverse=True)
             
             all_sorted = passing_pools + failing_pools
@@ -2270,35 +2265,35 @@ def handle_manual_buy_callback(config, state, chat_id, cb_data):
 def handle_telegram_buy_token(config, state, token_address, deposit_amount_override=None, downside_pct=91, strategy="spot"):
     send_telegram(config, f"🔍 <b>Manuel Alım Talebi:</b> <code>{token_address}</code> araştırılıyor...\n• Yüzde: -%{downside_pct}\n• Strateji: {strategy.upper()}")
     
-    # 1. Fetch pools
+    # 1. Fetch & sort eligible pools (Quote-Only SOL prioritized)
     pools = fetch_meteora_pools(token_address)
-    selected_pool = select_best_pool(config, pools)
-    if not selected_pool:
-        send_telegram(config, "❌ Hata: Bu token için kriterlerimize uygun (TVL >= 15k, fee mode=1, bin step >= 80, fee >= 2.0%) DLMM havuzu bulunamadı.")
+    eligible_pools = get_eligible_pools_sorted(config, pools)
+    if not eligible_pools:
+        send_telegram(config, "❌ Hata: Bu token için kriterlerimize uygun (TVL >= 15k, bin step >= 80, fee >= 2.0%) DLMM havuzu bulunamadı.")
+        return
+        
+    selected_pool = None
+    range_check = None
+    for candidate in eligible_pools:
+        p_addr = candidate["address"]
+        rc = run_bridge(["check-range", p_addr, str(downside_pct)])
+        missing_arrays = rc.get("missing_arrays", 0)
+        if rc.get("success") and rc.get("eligible") and missing_arrays == 0:
+            selected_pool = candidate
+            range_check = rc
+            break
+        else:
+            logging.info(f"Quick manual buy skipping pool {p_addr} due to uninitialized bin arrays ({missing_arrays}) or ineligible range.")
+
+    if not selected_pool or not range_check:
+        send_telegram(config, (
+            f"❌ <b>Alım İptal Edildi:</b> Kriterleri geçen tüm havuzlarda initialize edilmemiş bin arrayleri tespit edildi!\n"
+            f"Ekstra kira harcamamak için güvenlik kuralı gereği işlem açılmadı."
+        ))
         return
         
     pool_address = selected_pool["address"]
     symbol = selected_pool.get("tokenX", {}).get("symbol", "TOKEN")
-    
-    # 2. Check range & uninitialized bin arrays
-    range_check = run_bridge(["check-range", pool_address, str(downside_pct)])
-    if not range_check.get("success"):
-        send_telegram(config, f"❌ Hata: Menzil ve kira maliyeti sorgulanamadı: <code>{range_check.get('error')}</code>")
-        return
-        
-    eligible = range_check.get("eligible", False)
-    missing_arrays = range_check.get("missing_arrays", 0)
-    non_refundable_fee = range_check.get("non_refundable_fee", 0.0)
-    
-    # "eğer non refund ise işlem açmasın error versin"
-    if not eligible or missing_arrays > 0:
-        send_telegram(config, (
-            f"❌ <b>Alım İptal Edildi:</b> Havuzda initialize edilmemiş bin arrayleri tespit edildi!\n"
-            f"• <b>Eksik Array Sayısı:</b> {missing_arrays}\n"
-            f"• <b>Kira Maliyeti (Non-refundable):</b> {non_refundable_fee:.5f} SOL\n"
-            f"Bu maliyet kalıcı olduğu için güvenlik kuralı gereği işlem açılmadı."
-        ))
-        return
         
     # 3. Calculate deposit amount
     bal_check = run_bridge(["get-balance"])
