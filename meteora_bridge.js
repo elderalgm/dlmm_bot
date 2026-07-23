@@ -102,6 +102,11 @@ async function cmdGetBalance(config) {
   return { success: true, balance: balance / 1e9 };
 }
 
+async function cmdGetWalletAddress(config) {
+  const wallet = getWalletKeypair(config);
+  return { success: true, address: wallet.publicKey.toBase58() };
+}
+
 // ─── Command: check-range ─────────────────────────────────────
 async function cmdCheckRange(config, poolAddressStr, downsidePctStr) {
   const connection = getSolanaConnection(config);
@@ -778,6 +783,9 @@ async function main() {
   switch (command) {
     case "get-balance":
       result = await cmdGetBalance(config);
+      break;
+    case "get-wallet-address":
+      result = await cmdGetWalletAddress(config);
       break;
     case "check-range":
       if (args.length < 2) throw new Error("Missing pool address for check-range");

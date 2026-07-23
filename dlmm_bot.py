@@ -856,6 +856,109 @@ def fetch_meteora_pools(token_address):
         logging.error(f"Error fetching pools from Meteora: {e}")
     return []
 
+def get_wallet_address():
+    res = run_bridge(["get-wallet-address"])
+    return res.get("address") if res.get("success") else None
+
+def parse_meteora_float(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+def parse_meteora_timestamp(value):
+    try:
+        ts = float(value or 0)
+        if ts > 1_000_000_000_000:
+            ts = ts / 1000
+        return ts
+    except (ValueError, TypeError):
+        return 0.0
+
+def fetch_meteora_position_pnls(config, pool_addresses, status="closed"):
+    wallet = get_wallet_address()
+    if not wallet:
+        return {}
+
+    positions = {}
+    for pool_address in sorted(set(p for p in pool_addresses if p)):
+        page = 1
+        while page <= 5:
+            url = f"https://dlmm.datapi.meteora.ag/positions/{pool_address}/pnl"
+            params = {
+                "user": wallet,
+                "status": status,
+                "page": page,
+                "page_size": 100
+            }
+            try:
+                res = requests.get(url, params=params, timeout=15)
+                if res.status_code != 200:
+                    logging.warning(f"Meteora PnL API failed for pool {pool_address}: {res.status_code} {res.text[:200]}")
+                    break
+                data = res.json()
+                for p in data.get("positions", []):
+                    pos_addr = p.get("positionAddress")
+                    if not pos_addr:
+                        continue
+                    positions[pos_addr] = {
+                        "pool_address": pool_address,
+                        "closed_at": parse_meteora_timestamp(p.get("closedAt")),
+                        "created_at": parse_meteora_timestamp(p.get("createdAt")),
+                        "pnl_sol": parse_meteora_float(p.get("pnlSol")),
+                        "pnl_sol_pct": parse_meteora_float(p.get("pnlSolPctChange")),
+                        "pnl_usd": parse_meteora_float(p.get("pnlUsd")),
+                        "pnl_pct": parse_meteora_float(p.get("pnlPctChange")),
+                        "deposit_sol": parse_meteora_float(((p.get("allTimeDeposits") or {}).get("total") or {}).get("sol")),
+                        "withdrawal_sol": parse_meteora_float(((p.get("allTimeWithdrawals") or {}).get("total") or {}).get("sol")),
+                        "fee_sol": parse_meteora_float(((p.get("allTimeFees") or {}).get("total") or {}).get("sol")),
+                    }
+                if not data.get("hasNext"):
+                    break
+                page += 1
+            except Exception as e:
+                logging.warning(f"Error fetching Meteora position PnL for pool {pool_address}: {e}")
+                break
+    return positions
+
+def fetch_meteora_open_portfolio(config):
+    wallet = get_wallet_address()
+    if not wallet:
+        return {}
+
+    try:
+        res = requests.get(
+            "https://dlmm.datapi.meteora.ag/portfolio/open",
+            params={"user": wallet, "page": 1, "page_size": 50},
+            timeout=15
+        )
+        if res.status_code != 200:
+            logging.warning(f"Meteora open portfolio API failed: {res.status_code} {res.text[:200]}")
+            return {}
+        data = res.json()
+    except Exception as e:
+        logging.warning(f"Error fetching Meteora open portfolio: {e}")
+        return {}
+
+    by_position = {}
+    by_pool = {}
+    for pool in data.get("pools", []):
+        item = {
+            "pool_address": pool.get("poolAddress"),
+            "pnl_sol": parse_meteora_float(pool.get("pnlSol")),
+            "pnl_sol_pct": parse_meteora_float(pool.get("pnlSolPctChange")),
+            "balances_sol": parse_meteora_float(pool.get("balancesSol")),
+            "unclaimed_fees_sol": parse_meteora_float(pool.get("unclaimedFeesSol")),
+            "total_deposit_sol": parse_meteora_float(pool.get("totalDepositSol")),
+        }
+        if item["pool_address"]:
+            by_pool[item["pool_address"]] = item
+        for pos_addr in pool.get("listPositions", []) or []:
+            by_position[pos_addr] = item
+    return {"by_position": by_position, "by_pool": by_pool}
+
 # ─── Screen Pool ──────────────────────────────────────────────
 def get_safe_tvl(p):
     if not isinstance(p, dict):
@@ -1632,6 +1735,8 @@ def handle_telegram_positions(config, state):
         state["active_positions"] = active_positions_state
         save_state(state)
         
+    meteora_open = fetch_meteora_open_portfolio(config)
+
     # Display updated position data
     for ocp in on_chain_positions:
         addr = ocp["token_address"]
@@ -1675,19 +1780,21 @@ def handle_telegram_positions(config, state):
         else:
             deposit_sol_str = f"{deposit:.5f} SOL"
             
-        # Calculate Net PnL estimation
-        open_price = pos_state.get("open_price", 0.0)
-        active_price = range_res.get("active_price", 0.0) if range_res.get("success") else 0.0
-        
-        if open_price > 0 and active_price > 0 and deposit > 0:
-            price_pct = ((active_price - open_price) / open_price) * 100
-            est_pnl = fee_sol + (deposit * (price_pct / 100))
-            pnl_emoji = "🟢" if est_pnl >= 0 else "🔴"
-            pnl_sign = "+" if est_pnl >= 0 else ""
-            pnl_line = f"<b>Net PnL (Tahmini):</b> <code>{pnl_emoji} {pnl_sign}{est_pnl:.5f} SOL ({pnl_sign}{price_pct:.2f}%)</code>\n"
+        meteora_pnl = meteora_open.get("by_position", {}).get(pos_state.get("position_address")) or meteora_open.get("by_pool", {}).get(pool)
+        if meteora_pnl:
+            pnl_sol = meteora_pnl.get("pnl_sol", 0.0)
+            pnl_pct = meteora_pnl.get("pnl_sol_pct", 0.0)
+            balances_sol = meteora_pnl.get("balances_sol", 0.0)
+            unclaimed_fees_sol = meteora_pnl.get("unclaimed_fees_sol", 0.0)
+            pnl_emoji = "🟢" if pnl_sol >= 0 else "🔴"
+            pnl_sign = "+" if pnl_sol >= 0 else ""
+            pct_sign = "+" if pnl_pct >= 0 else ""
+            pnl_line = (
+                f"<b>Meteora PnL:</b> <code>{pnl_emoji} {pnl_sign}{pnl_sol:.5f} SOL ({pct_sign}{pnl_pct:.2f}%)</code>\n"
+                f"<b>Meteora Değer:</b> <code>{balances_sol:.5f} SOL</code> | <b>Unclaimed Fees:</b> <code>{unclaimed_fees_sol:.6f} SOL</code>\n"
+            )
         else:
-            pnl_emoji = "🟢" if fee_sol >= 0 else "🔴"
-            pnl_line = f"<b>Net PnL (Tahmini):</b> <code>{pnl_emoji} +{fee_sol:.6f} SOL (Komisyon)</code>\n"
+            pnl_line = "<b>Meteora PnL:</b> <code>Alınamadı</code>\n"
 
         msg = (
             f"📈 <b>POZİSYON: {symbol}</b>\n"
@@ -1719,6 +1826,29 @@ def handle_telegram_history(config, state):
     if not history:
         send_telegram(config, "📂 <b>İşlem geçmişi bulunmamaktadır.</b>")
         return
+
+    pool_addresses = [p.get("pool_address") for p in history]
+    meteora_closed = fetch_meteora_position_pnls(config, pool_addresses, status="closed")
+
+    def merge_meteora_history(pos):
+        merged = dict(pos)
+        m = meteora_closed.get(pos.get("position_address"))
+        if not m:
+            merged["pnl_source"] = "Bot"
+            return merged
+
+        merged["pnl"] = m.get("pnl_sol", pos.get("pnl", 0.0))
+        merged["pnl_pct"] = m.get("pnl_sol_pct", pos.get("pnl_pct", 0.0))
+        if m.get("deposit_sol", 0.0) > 0:
+            merged["deposit_sol"] = m["deposit_sol"]
+        if m.get("closed_at", 0.0) > 0:
+            merged["closed_at"] = m["closed_at"]
+        merged["retrieved_sol"] = m.get("withdrawal_sol", pos.get("retrieved_sol", 0.0))
+        merged["fee_sol"] = m.get("fee_sol", 0.0)
+        merged["pnl_source"] = "Meteora"
+        return merged
+
+    merged_history = [merge_meteora_history(p) for p in history]
         
     now = time.time()
     three_days_ago = now - (3 * 86400)
@@ -1734,9 +1864,9 @@ def handle_telegram_history(config, state):
     day_before_start_dt = today_start_dt - datetime.timedelta(days=2)
     day_before_start = day_before_start_dt.timestamp()
     
-    today_items = [p for p in history if p.get("closed_at", 0) >= today_start]
-    yesterday_items = [p for p in history if yesterday_start <= p.get("closed_at", 0) < today_start]
-    day_before_items = [p for p in history if day_before_start <= p.get("closed_at", 0) < yesterday_start]
+    today_items = [p for p in merged_history if p.get("closed_at", 0) >= today_start]
+    yesterday_items = [p for p in merged_history if yesterday_start <= p.get("closed_at", 0) < today_start]
+    day_before_items = [p for p in merged_history if day_before_start <= p.get("closed_at", 0) < yesterday_start]
     
     today_pnl = sum(p.get("pnl", 0.0) for p in today_items)
     yesterday_pnl = sum(p.get("pnl", 0.0) for p in yesterday_items)
@@ -1766,7 +1896,7 @@ def handle_telegram_history(config, state):
     
     msg_lines = [header]
     # Show last 5 closed positions
-    for pos in reversed(history[-5:]):
+    for pos in reversed(merged_history[-5:]):
         symbol = pos.get("symbol", "UNKNOWN")
         deposit = pos.get("deposit_sol", 0.0)
         pnl = pos.get("pnl", 0.0)
@@ -1810,7 +1940,7 @@ def handle_telegram_history(config, state):
         line = (
             f"🪙 <b>{symbol}</b>\n"
             f"  • <b>Giriş:</b> {deposit_str}\n"
-            f"  • <b>Net Kar/Zarar:</b> {pnl_str}\n"
+            f"  • <b>{pos.get('pnl_source', 'Bot')} PnL:</b> {pnl_str}\n"
             f"  • <b>Zaman/Neden:</b> {closed_at} | <i>{display_reason}</i>\n"
             f"━━━━━━━━━━━━━━━━━━"
         )
