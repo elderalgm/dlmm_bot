@@ -856,7 +856,7 @@ def get_safe_tvl(p):
     except (ValueError, TypeError):
         return 0.0
 
-def select_best_pool(config, pools):
+def get_eligible_pools_sorted(config, pools):
     eligible_pools = []
     for p in pools:
         passed, _ = check_pool_filters(config, p)
@@ -864,17 +864,27 @@ def select_best_pool(config, pools):
             eligible_pools.append(p)
             
     if not eligible_pools:
-        return None
+        return []
     
-    # Sort eligible pools: first prefer pools meeting TVL >= min_tvl, then by TVL descending
+    # Sort eligible pools:
+    # 1. meets_tvl (TVL >= min_tvl)
+    # 2. is_quote_only (collect_fee_mode == 1) -> PRIORITIZE Quote-Only SOL pools!
+    # 3. TVL descending
     min_tvl = config.get("min_tvl", 15000)
     def pool_sort_key(p):
         tvl = get_safe_tvl(p)
         meets_tvl = 1 if tvl >= min_tvl else 0
-        return (meets_tvl, tvl)
+        cfg = p.get("pool_config") or {}
+        collect_fee_mode = safe_int(cfg, "collect_fee_mode", -1)
+        is_quote_only = 1 if collect_fee_mode == 1 else 0
+        return (meets_tvl, is_quote_only, tvl)
         
     eligible_pools.sort(key=pool_sort_key, reverse=True)
-    return eligible_pools[0]
+    return eligible_pools
+
+def select_best_pool(config, pools):
+    sorted_pools = get_eligible_pools_sorted(config, pools)
+    return sorted_pools[0] if sorted_pools else None
 
 # ─── Main Bot Logic ───────────────────────────────────────────
 def check_tokens(config, state):
@@ -1022,18 +1032,27 @@ def check_tokens(config, state):
                 
             # ─── Meteora Pool Checks ──────────────────────────────
             pools = fetch_meteora_pools(address)
-            selected_pool = select_best_pool(config, pools)
-            if not selected_pool:
+            eligible_pools = get_eligible_pools_sorted(config, pools)
+            if not eligible_pools:
+                continue
+                
+            selected_pool = None
+            range_check = None
+            for candidate in eligible_pools:
+                p_addr = candidate["address"]
+                rc = run_bridge(["check-range", p_addr])
+                missing_arrays = rc.get("missing_arrays", 0)
+                if rc.get("success") and rc.get("eligible") and missing_arrays == 0:
+                    selected_pool = candidate
+                    range_check = rc
+                    break
+                else:
+                    logging.info(f"Skipping pool {p_addr} for {symbol} due to uninitialized bin arrays ({missing_arrays}) or ineligible range.")
+
+            if not selected_pool or not range_check:
                 continue
                 
             pool_address = selected_pool["address"]
-            
-            # Check range eligibility (uninitialized bin arrays) via bridge
-            range_check = run_bridge(["check-range", pool_address])
-            missing_arrays = range_check.get("missing_arrays", 0)
-            if not range_check.get("success") or not range_check.get("eligible") or missing_arrays > 0:
-                logging.info(f"Skipping pool {pool_address} for {symbol} due to uninitialized bin arrays ({missing_arrays}) or rent cost.")
-                continue
                 
             # ─── Open Position ────────────────────────────────────
             # Fetch balance
