@@ -491,14 +491,14 @@ def setup_telegram_commands(config):
     url = f"https://api.telegram.org/bot{token}/setMyCommands"
     payload = {
         "commands": [
-            {"command": "menu", "description": "Ana Menüyü Göster"},
-            {"command": "status", "description": "Bot Durumu ve Bakiye"},
-            {"command": "positions", "description": "Aktif Pozisyonlar"},
-            {"command": "candidates", "description": "GMGN Aday Tokenler"},
-            {"command": "buy", "description": "Manuel İşlem Başlat"},
-            {"command": "history", "description": "Son 5 İşlem Geçmişi"},
-            {"command": "toggle_mode", "description": "Canlı/Simülasyon Değiştir"},
-            {"command": "toggle_pause", "description": "Botu Başlat/Durdur"}
+            {"command": "start", "description": "🏠 Ana Menüyü Aç"},
+            {"command": "buy", "description": "🛒 Manuel Alım Başlat"},
+            {"command": "positions", "description": "📊 Aktif Pozisyonlar & PnL"},
+            {"command": "status", "description": "📈 Bot Durum Raporu"},
+            {"command": "history", "description": "📜 İşlem Geçmişi"},
+            {"command": "candidates", "description": "🔍 Aday Token Taraması"},
+            {"command": "pause", "description": "⏸️ Botu Duraklat"},
+            {"command": "resume", "description": "▶️ Botu Devam Ettir"}
         ]
     }
     try:
@@ -1107,14 +1107,15 @@ def check_tokens(config, state):
                 
                 # Send telegram message
                 msg = (
-                    f"✅ <b>POSITION OPENED: {symbol}</b>\n\n"
-                    f"<b>Pool Address:</b> <code>{pool_address}</code>\n"
-                    f"<b>Position:</b> <code>{pos_addr}</code>\n"
-                    f"<b>Deposit:</b> {deposit_sol:.5f} SOL\n"
-                    f"<b>Strategy:</b> {strategy.upper()}\n"
-                    f"<b>Refundable Rent:</b> {open_res.get('refundable_rent'):.5f} SOL\n"
-                    f"<b>Range:</b> {open_res.get('lower_bin')} to {open_res.get('upper_bin')}\n"
-                    f"🔗 <a href='https://gmgn.ai/sol/token/{address}'>View on GMGN</a>"
+                    f"✅ <b>POZİSYON AÇILDI: {symbol}</b>\n\n"
+                    f"<b>Token Adresi:</b> <code>{address}</code>\n"
+                    f"🔗 <a href='https://gmgn.ai/sol/token/{address}'>GMGN Grafiği</a>\n"
+                    f"🌊 <a href='https://app.meteora.ag/dlmm/{pool_address}'>Meteora Havuzu</a>\n\n"
+                    f"<b>Pozisyon Kontratı:</b> <code>{pos_addr}</code>\n"
+                    f"<b>Yatırılan:</b> {deposit_sol:.5f} SOL\n"
+                    f"<b>Strateji:</b> {strategy.upper()}\n"
+                    f"<b>Geri Alınabilir Kira:</b> {open_res.get('refundable_rent'):.5f} SOL\n"
+                    f"<b>Menzil Bins:</b> {open_res.get('lower_bin')} - {open_res.get('upper_bin')}"
                 )
                 send_telegram(config, msg)
             else:
@@ -1660,6 +1661,20 @@ def handle_telegram_positions(config, state):
         else:
             deposit_sol_str = f"{deposit:.5f} SOL"
             
+        # Calculate Net PnL estimation
+        open_price = pos_state.get("open_price", 0.0)
+        active_price = range_res.get("active_price", 0.0) if range_res.get("success") else 0.0
+        
+        if open_price > 0 and active_price > 0 and deposit > 0:
+            price_pct = ((active_price - open_price) / open_price) * 100
+            est_pnl = fee_sol + (deposit * (price_pct / 100))
+            pnl_emoji = "🟢" if est_pnl >= 0 else "🔴"
+            pnl_sign = "+" if est_pnl >= 0 else ""
+            pnl_line = f"<b>Net PnL (Tahmini):</b> <code>{pnl_emoji} {pnl_sign}{est_pnl:.5f} SOL ({pnl_sign}{price_pct:.2f}%)</code>\n"
+        else:
+            pnl_emoji = "🟢" if fee_sol >= 0 else "🔴"
+            pnl_line = f"<b>Net PnL (Tahmini):</b> <code>{pnl_emoji} +{fee_sol:.6f} SOL (Komisyon)</code>\n"
+
         msg = (
             f"📈 <b>POZİSYON: {symbol}</b>\n"
             f"<code>{addr}</code>\n"
@@ -1670,6 +1685,7 @@ def handle_telegram_positions(config, state):
             f"<b>Yatırılan Tutar:</b> {deposit_sol_str}\n"
             f"<b>Piyasa Değeri (MCap):</b> {mcap_str}\n"
             f"<b>Kazanılan Ücret (Fees):</b> <code>{fee_sol:.6f} SOL</code>\n"
+            f"{pnl_line}"
             "━━━━━━━━━━━━━━━━━━"
         )
         
@@ -1965,15 +1981,15 @@ def execute_manual_buy(config, state, chat_id):
         
         mode_str = "🧪 SIMULATION" if is_dry_run(config, state) else "🟢 LIVE"
         msg = (
-            f"✅ <b>MANUEL POZİSYON AÇILDI ({mode_str})</b>\n\n"
-            f"<b>Token:</b> {symbol}\n"
-            f"<b>Pool:</b> <code>{pool_address}</code>\n"
-            f"<b>Position:</b> <code>{pos_addr}</code>\n"
+            f"✅ <b>MANUEL POZİSYON AÇILDI ({mode_str}): {symbol}</b>\n\n"
+            f"<b>Token Adresi:</b> <code>{token_address}</code>\n"
+            f"🔗 <a href='https://gmgn.ai/sol/token/{token_address}'>GMGN Grafiği</a>\n"
+            f"🌊 <a href='https://app.meteora.ag/dlmm/{pool_address}'>Meteora Havuzu</a>\n\n"
+            f"<b>Pozisyon Kontratı:</b> <code>{pos_addr}</code>\n"
             f"<b>Yatırılan:</b> {deposit_sol:.5f} SOL\n"
             f"<b>Strateji:</b> {strategy.upper()}\n"
             f"<b>Geri Alınabilir Kira:</b> {open_res.get('refundable_rent', refundable_rent):.5f} SOL\n"
-            f"<b>Aralık Bins:</b> {open_res.get('lower_bin')} - {open_res.get('upper_bin')}\n"
-            f"🔗 <a href='https://gmgn.ai/sol/token/{token_address}'>View on GMGN</a>"
+            f"<b>Menzil Bins:</b> {open_res.get('lower_bin')} - {open_res.get('upper_bin')}"
         )
         send_telegram(config, msg)
     else:
