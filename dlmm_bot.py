@@ -1709,18 +1709,42 @@ def handle_telegram_history(config, state):
     now = time.time()
     three_days_ago = now - (3 * 86400)
     
-    # Calculate Last 3 Days Performance
-    history_3d = [p for p in history if p.get("closed_at", 0) >= three_days_ago]
-    pnl_3d = sum(p.get("pnl", 0.0) for p in history_3d)
-    count_3d = len(history_3d)
+    # Daily Breakdown: Today, Yesterday, Day Before Yesterday
+    now_dt = datetime.datetime.fromtimestamp(now)
+    today_start_dt = datetime.datetime(now_dt.year, now_dt.month, now_dt.day, 0, 0, 0)
+    today_start = today_start_dt.timestamp()
     
-    pnl_3d_emoji = "🟢" if pnl_3d >= 0 else "🔴"
-    pnl_3d_sign = "+" if pnl_3d >= 0 else ""
+    yesterday_start_dt = today_start_dt - datetime.timedelta(days=1)
+    yesterday_start = yesterday_start_dt.timestamp()
     
+    day_before_start_dt = today_start_dt - datetime.timedelta(days=2)
+    day_before_start = day_before_start_dt.timestamp()
+    
+    today_items = [p for p in history if p.get("closed_at", 0) >= today_start]
+    yesterday_items = [p for p in history if yesterday_start <= p.get("closed_at", 0) < today_start]
+    day_before_items = [p for p in history if day_before_start <= p.get("closed_at", 0) < yesterday_start]
+    
+    today_pnl = sum(p.get("pnl", 0.0) for p in today_items)
+    yesterday_pnl = sum(p.get("pnl", 0.0) for p in yesterday_items)
+    day_before_pnl = sum(p.get("pnl", 0.0) for p in day_before_items)
+    
+    today_date = today_start_dt.strftime("%d.%m")
+    yesterday_date = yesterday_start_dt.strftime("%d.%m")
+    day_before_date = day_before_start_dt.strftime("%d.%m")
+    
+    def fmt_day(pnl, items):
+        count = len(items)
+        if count == 0:
+            return "İşlem Yok"
+        emoji = "🟢" if pnl >= 0 else "🔴"
+        sign = "+" if pnl >= 0 else ""
+        return f"{emoji} {sign}{pnl:.5f} SOL ({count} işlem)"
+        
     header = (
-        f"📊 <b>SON 3 GÜNÜN TOPLAM PERFORMANSI</b>\n"
-        f"• <b>Kapalı İşlem Sayısı:</b> {count_3d} Adet\n"
-        f"• <b>Toplam Net Kar/Zarar:</b> <code>{pnl_3d_emoji} {pnl_3d_sign}{pnl_3d:.5f} SOL</code>\n"
+        f"📊 <b>GÜNLÜK PERFORMANS ÖZETİ</b>\n"
+        f"• <b>Bugün ({today_date}):</b> <code>{fmt_day(today_pnl, today_items)}</code>\n"
+        f"• <b>Dün ({yesterday_date}):</b> <code>{fmt_day(yesterday_pnl, yesterday_items)}</code>\n"
+        f"• <b>Önceki Gün ({day_before_date}):</b> <code>{fmt_day(day_before_pnl, day_before_items)}</code>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"📋 <b>SON 5 İŞLEM GEÇMİŞİ</b>\n"
         f"━━━━━━━━━━━━━━━━━━"
