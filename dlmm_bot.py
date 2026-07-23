@@ -8,6 +8,7 @@ import subprocess
 import requests
 import pandas as pd
 import html
+import datetime
 
 # Set console encoding to UTF-8 on Windows to prevent UnicodeEncodeError with emojis
 if sys.platform == "win32":
