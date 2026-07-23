@@ -380,7 +380,7 @@ def execute_close_and_swap(config, state, token_address, reason):
         else:
             retrieved_sol = sol_after - sol_before
             pnl = retrieved_sol - initial_spent
-            pnl_pct = (pnl / initial_spent) * 100 if initial_spent > 0 else 0.0
+            pnl_pct = (pnl / deposit_sol) * 100 if deposit_sol > 0 else 0.0
             
             pnl_sign = "+" if pnl >= 0 else ""
             pnl_pct_sign = "+" if pnl_pct >= 0 else ""
@@ -1706,13 +1706,39 @@ def handle_telegram_history(config, state):
         send_telegram(config, "📂 <b>İşlem geçmişi bulunmamaktadır.</b>")
         return
         
-    msg_lines = ["📋 <b>SON 5 İŞLEM GEÇMİŞİ</b>\n━━━━━━━━━━━━━━━━━━"]
+    now = time.time()
+    three_days_ago = now - (3 * 86400)
+    
+    # Calculate Last 3 Days Performance
+    history_3d = [p for p in history if p.get("closed_at", 0) >= three_days_ago]
+    pnl_3d = sum(p.get("pnl", 0.0) for p in history_3d)
+    count_3d = len(history_3d)
+    
+    pnl_3d_emoji = "🟢" if pnl_3d >= 0 else "🔴"
+    pnl_3d_sign = "+" if pnl_3d >= 0 else ""
+    
+    header = (
+        f"📊 <b>SON 3 GÜNÜN TOPLAM PERFORMANSI</b>\n"
+        f"• <b>Kapalı İşlem Sayısı:</b> {count_3d} Adet\n"
+        f"• <b>Toplam Net Kar/Zarar:</b> <code>{pnl_3d_emoji} {pnl_3d_sign}{pnl_3d:.5f} SOL</code>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📋 <b>SON 5 İŞLEM GEÇMİŞİ</b>\n"
+        f"━━━━━━━━━━━━━━━━━━"
+    )
+    
+    msg_lines = [header]
     # Show last 5 closed positions
     for pos in reversed(history[-5:]):
         symbol = pos.get("symbol", "UNKNOWN")
         deposit = pos.get("deposit_sol", 0.0)
         pnl = pos.get("pnl", 0.0)
-        pnl_pct = pos.get("pnl_pct", 0.0)
+        
+        # Calculate accurate ROI % based on deposited capital
+        if deposit > 0:
+            pnl_pct = (pnl / deposit) * 100
+        else:
+            pnl_pct = pos.get("pnl_pct", 0.0)
+            
         reason = pos.get("reason", "N/A")
         
         # Format Turkish exit reasons nicely
@@ -1740,13 +1766,13 @@ def handle_telegram_history(config, state):
         else:
             pnl_emoji = "🟢" if pnl >= 0 else "🔴"
             pnl_sign = "+" if pnl >= 0 else ""
-            pnl_str = f"{pnl_emoji} {pnl_sign}{pnl:.4f} SOL ({pnl_sign}{pnl_pct:.2f}%)"
-            deposit_str = f"{deposit:.4f} SOL"
+            pnl_str = f"{pnl_emoji} {pnl_sign}{pnl:.5f} SOL ({pnl_sign}{pnl_pct:.2f}%)"
+            deposit_str = f"{deposit:.5f} SOL"
             
         line = (
             f"🪙 <b>{symbol}</b>\n"
             f"  • <b>Giriş:</b> {deposit_str}\n"
-            f"  • <b>Kar/Zarar:</b> {pnl_str}\n"
+            f"  • <b>Net Kar/Zarar:</b> {pnl_str}\n"
             f"  • <b>Zaman/Neden:</b> {closed_at} | <i>{display_reason}</i>\n"
             f"━━━━━━━━━━━━━━━━━━"
         )
