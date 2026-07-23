@@ -65,7 +65,9 @@ def load_config():
         "min_tvl": float(os.environ.get("MIN_TVL", config.get("min_tvl", 15000))),
         "min_bin_step": int(os.environ.get("MIN_BIN_STEP", config.get("min_bin_step", 80))),
         "priority_fee_micro_lamports": int(os.environ.get("PRIORITY_FEE_MICRO_LAMPORTS", config.get("priority_fee_micro_lamports", 25000))),
-        "state_sync_interval_seconds": int(os.environ.get("STATE_SYNC_INTERVAL_SECONDS", config.get("state_sync_interval_seconds", 1800)))
+        "state_sync_interval_seconds": int(os.environ.get("STATE_SYNC_INTERVAL_SECONDS", config.get("state_sync_interval_seconds", 1800))),
+        "close_swap_attempts": int(os.environ.get("CLOSE_SWAP_ATTEMPTS", config.get("close_swap_attempts", 3))),
+        "close_swap_initial_delay_seconds": int(os.environ.get("CLOSE_SWAP_INITIAL_DELAY_SECONDS", config.get("close_swap_initial_delay_seconds", 2)))
     }
     return merged
 
@@ -326,12 +328,28 @@ def execute_close_and_swap(config, state, token_address, reason):
         swap_failed_warning = ""
         
         if not dry_run and token_x_amount > 0 and token_x_mint:
-            logging.info(f"Swapping {token_x_amount} {symbol} back to SOL...")
-            swap_res = run_bridge(["swap", token_x_mint, "SOL", f"{token_x_amount:.8f}"])
+            max_swap_attempts = max(1, int(config.get("close_swap_attempts", 3)))
+            initial_delay = max(0, int(config.get("close_swap_initial_delay_seconds", 2)))
+            if initial_delay > 0:
+                logging.info(f"Waiting {initial_delay}s for token balance/indexer sync before swapping {symbol}...")
+                time.sleep(initial_delay)
+
+            for attempt in range(1, max_swap_attempts + 1):
+                logging.info(f"Swapping {token_x_amount} {symbol} back to SOL (attempt {attempt}/{max_swap_attempts})...")
+                swap_res = run_bridge(["swap", token_x_mint, "SOL", f"{token_x_amount:.8f}"])
+                if swap_res.get("success"):
+                    break
+
+                logging.warning(f"Swap attempt {attempt}/{max_swap_attempts} failed for {symbol}: {swap_res.get('error', 'Unknown error')}")
+                if attempt < max_swap_attempts:
+                    time.sleep(min(10, (attempt + 1) * 2))
+
             if not swap_res.get("success"):
+                swap_error = html.escape(str(swap_res.get("error", "Bilinmeyen hata")))
                 swap_failed_warning = (
                     "\n\n⚠️ <b>Swap işlemi başarısız oldu!</b> Tokenlar cüzdanda kaldı, "
                     "10 dakika içindeki temizlik döngüsünde otomatik olarak SOL'e çevrilecektir."
+                    f"\n<b>Son Hata:</b> <code>{swap_error}</code>"
                 )
                 
         sol_after = 0.0
@@ -714,6 +732,35 @@ def calculate_indicators(klines):
     return df
 
 # ─── Signal Evaluation ────────────────────────────────────────
+def is_strong_ath_continuation(df, index=-1):
+    """Detect price-discovery momentum where overbought signals are bullish continuation."""
+    if df is None or len(df) < abs(index) + 2:
+        return False
+
+    pos_idx = index if index >= 0 else len(df) + index
+    if pos_idx <= 0:
+        return False
+
+    last = df.iloc[pos_idx]
+    prev = df.iloc[pos_idx - 1]
+    prev_high = df.iloc[:pos_idx]['high'].max()
+
+    if pd.isna(prev_high) or prev_high <= 0:
+        return False
+
+    making_recent_high = last['high'] >= prev_high * 0.995 or last['close'] >= prev_high
+    macd_stays_green = (
+        pd.notna(last['MACD_hist']) and pd.notna(prev['MACD_hist'])
+        and last['MACD_hist'] > 0 and prev['MACD_hist'] > 0
+    )
+    above_upper_bb = pd.notna(last['BB_upper']) and (
+        last['high'] >= last['BB_upper'] or last['close'] > last['BB_upper']
+    )
+    supertrend_bullish = pd.notna(last['ST_dir']) and last['ST_dir'] == 1
+
+    return making_recent_high and macd_stays_green and above_upper_bb and supertrend_bullish
+
+
 def check_exit_signal(df, index=-1):
     """ Returns True if at least 2 out of 4 exit indicators trigger """
     if df is None or len(df) < index * -1:
@@ -744,7 +791,12 @@ def check_exit_signal(df, index=-1):
             triggers.append("Supertrend Red Line Touch")
         elif prev['ST_dir'] == -1 and last['ST_dir'] == 1:
             triggers.append("Supertrend Red -> Green")
-            
+
+    if len(triggers) >= 2 and is_strong_ath_continuation(df, index):
+        bullish_triggers = {"RSI(2) >= 90", "Bollinger Upper Band Touch"}
+        if set(triggers).issubset(bullish_triggers):
+            return False, ["ATH Momentum Continuation"]
+
     return len(triggers) >= 2, triggers
 
 # ─── Fetch Kline Data ─────────────────────────────────────────

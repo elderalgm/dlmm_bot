@@ -44,6 +44,29 @@ function getWalletKeypair(config) {
   return Keypair.fromSecretKey(bs58.decode(config.wallet_private_key));
 }
 
+async function getTokenBalanceRaw(connection, ownerPublicKey, mintPublicKey) {
+  const tokenAccounts = await connection.getParsedTokenAccountsByOwner(ownerPublicKey, {
+    mint: mintPublicKey
+  });
+
+  let rawAmount = 0n;
+  let decimals = 0;
+  let uiAmount = 0;
+
+  for (const account of tokenAccounts.value) {
+    const tokenAmount = account.account.data.parsed.info.tokenAmount;
+    rawAmount += BigInt(tokenAmount.amount || "0");
+    decimals = tokenAmount.decimals;
+    uiAmount += tokenAmount.uiAmount || 0;
+  }
+
+  return {
+    rawAmount: rawAmount.toString(),
+    decimals,
+    uiAmount
+  };
+}
+
 async function sendAndConfirmTransactionWithFees(connection, tx, signers) {
   if (tx.instructions) {
     let hasComputeBudget = false;
@@ -397,15 +420,21 @@ async function cmdSwap(config, inputMint, outputMint, amountStr) {
     throw new Error("Amount must be greater than 0");
   }
   
-  // Convert amount to smallest unit
+  // Convert amount to smallest unit. For SPL tokens, use the live wallet balance
+  // after liquidity removal to avoid indexer lag and tiny dust mismatches.
   let decimals = 9; // default SOL
+  let rawAmountStr;
   const SOL_MINT = "So11111111111111111111111111111111111111112";
   if (inputMint !== SOL_MINT && inputMint !== "SOL") {
-    const mintInfo = await connection.getParsedAccountInfo(new PublicKey(inputMint));
-    decimals = mintInfo.value?.data?.parsed?.info?.decimals ?? 9;
+    const balance = await getTokenBalanceRaw(connection, wallet.publicKey, new PublicKey(inputMint));
+    if (BigInt(balance.rawAmount) <= 0n) {
+      throw new Error(`No live SPL balance found for ${inputMint}`);
+    }
+    decimals = balance.decimals;
+    rawAmountStr = balance.rawAmount;
+  } else {
+    rawAmountStr = Math.floor(amount * Math.pow(10, decimals)).toString();
   }
-  
-  const rawAmountStr = Math.floor(amount * Math.pow(10, decimals)).toString();
   
   const searchParams = new URLSearchParams({
     inputMint: inputMint === "SOL" ? SOL_MINT : inputMint,
@@ -459,7 +488,7 @@ async function cmdSwap(config, inputMint, outputMint, amountStr) {
   return {
     success: true,
     tx: result.signature,
-    amount_in: amount,
+    amount_in: parseFloat(rawAmountStr) / Math.pow(10, decimals),
     amount_out_raw: result.outputAmountResult
   };
 }
